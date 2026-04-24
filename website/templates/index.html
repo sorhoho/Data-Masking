@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Home – CRM Portal{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-8">
+
+    <div class="text-center mb-5">
+      <h1 class="display-5 fw-bold">Customer Data Portal</h1>
+      <p class="lead text-muted">Secure access with role-based data masking</p>
+    </div>
+
+    {% if user %}
+      <div class="alert alert-success">
+        Logged in as <strong>{{ user.get('preferred_username') }}</strong>.
+        <a href="/search" class="alert-link">Search for a customer &rarr;</a>
+      </div>
+    {% else %}
+      <div class="card shadow-sm">
+        <div class="card-body p-4">
+          <h5 class="card-title">Architecture</h5>
+          <ol class="list-group list-group-numbered list-group-flush mb-4">
+            <li class="list-group-item">Website authenticates users via <strong>Keycloak OIDC</strong></li>
+            <li class="list-group-item">API requests carry the JWT to <strong>Kong API Gateway</strong></li>
+            <li class="list-group-item">Kong introspects the token with <strong>Keycloak</strong></li>
+            <li class="list-group-item">Kong checks <strong>Open Policy Agent</strong> (allow / deny / mask)</li>
+            <li class="list-group-item">Kong fetches data from the <strong>CRM system</strong></li>
+            <li class="list-group-item">Kong <strong>masks sensitive fields</strong> (name, MSISDN, email) before returning</li>
+          </ol>
+
+          <h5>Demo credentials</h5>
+          <table class="table table-sm table-bordered">
+            <thead class="table-light"><tr><th>Username</th><th>Password</th><th>Role</th><th>Masking applied</th></tr></thead>
+            <tbody>
+              <tr><td>agent1</td><td>agent123</td><td><span class="badge bg-secondary">agent</span></td><td>name, MSISDN, email</td></tr>
+              <tr><td>supervisor1</td><td>super123</td><td><span class="badge bg-warning text-dark">supervisor</span></td><td>MSISDN only</td></tr>
+              <tr><td>admin1</td><td>admin123</td><td><span class="badge bg-danger">admin</span></td><td>none (full access)</td></tr>
+            </tbody>
+          </table>
+
+          <a href="/login" class="btn btn-primary btn-lg w-100 mt-2">
+            Login with Keycloak
+          </a>
+        </div>
+      </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}

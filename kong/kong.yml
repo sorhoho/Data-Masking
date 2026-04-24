@@ -1,0 +1,58 @@
+_format_version: "3.0"
+_transform: true
+
+# ── Upstream CRM service ──────────────────────────────────────────────────────
+services:
+  - name: crm-service
+    url: http://crm-mock:5000
+    connect_timeout: 10000
+    read_timeout: 10000
+    write_timeout: 10000
+    routes:
+      - name: crm-customer-route
+        paths:
+          - /api/customer
+        methods:
+          - GET
+        strip_path: false
+
+# ── Plugins (applied to the crm-service) ─────────────────────────────────────
+plugins:
+
+  # CORS – allow the website frontend to call Kong directly if needed
+  - name: cors
+    service: crm-service
+    config:
+      origins:
+        - "*"
+      methods:
+        - GET
+        - OPTIONS
+      headers:
+        - Authorization
+        - Content-Type
+      credentials: true
+      max_age: 3600
+
+  # ── Step 1: JWT introspection + OPA policy check ──────────────────────────
+  - name: pre-function
+    service: crm-service
+    config:
+      access:
+        - |
+          dofile("/kong/plugins/auth-opa.lua")
+
+  # ── Step 2: Response masking ───────────────────────────────────────────────
+  - name: post-function
+    service: crm-service
+    config:
+      # Drop Content-Length so body size change doesn't corrupt the response
+      header_filter:
+        - |
+          local fields = kong.ctx.shared.masked_fields
+          if fields and #fields > 0 then
+            kong.response.clear_header("Content-Length")
+          end
+      body_filter:
+        - |
+          dofile("/kong/plugins/masking.lua")

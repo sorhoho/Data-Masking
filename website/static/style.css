@@ -1,0 +1,36 @@
+body {
+  background-color: #f4f6fb;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+.navbar {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.card {
+  border-radius: 0.6rem;
+}
+
+.card-header {
+  border-radius: 0.6rem 0.6rem 0 0 !important;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+
+.footer {
+  border-top: 1px solid #dee2e6;
+  font-size: 0.8rem;
+}
+
+dt {
+  font-weight: 600;
+  color: #495057;
+}
+
+dd {
+  color: #212529;
+}
+
+.font-monospace {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}

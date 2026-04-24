@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Customer {{ customer_id }} – CRM Portal{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h2>Customer Record &mdash; <code>{{ customer_id }}</code></h2>
+  <a href="/search" class="btn btn-outline-secondary">&larr; Back to search</a>
+</div>
+
+{% if error %}
+  <div class="alert alert-danger">
+    <strong>Error:</strong> {{ error }}
+  </div>
+
+{% elif customer %}
+
+  {# ── Masking notice ───────────────────────────────────────────────── #}
+  {% set meta = customer.get('_masking', {}) %}
+  {% if meta.get('applied') %}
+    <div class="alert alert-warning d-flex align-items-start gap-2">
+      <span class="fs-4">&#128274;</span>
+      <div>
+        <strong>Data masking active</strong> &mdash; role: <code>{{ meta.role }}</code><br/>
+        Masked fields:
+        {% for f in meta.masked_fields %}
+          <span class="badge bg-warning text-dark">{{ f }}</span>
+        {% endfor %}
+        <small class="d-block mt-1 text-muted">Masking enforced by Kong → OPA. Raw values never leave the CRM.</small>
+      </div>
+    </div>
+  {% else %}
+    <div class="alert alert-success">
+      &#9989; <strong>Full access</strong> – no masking applied for role <code>{{ meta.get('role', 'admin') }}</code>.
+    </div>
+  {% endif %}
+
+  {# ── Customer card ────────────────────────────────────────────────── #}
+  <div class="row g-4">
+    <div class="col-md-6">
+      <div class="card shadow-sm h-100">
+        <div class="card-header bg-primary text-white fw-bold">
+          &#128100; Identity
+        </div>
+        <div class="card-body">
+          <dl class="row mb-0">
+            <dt class="col-sm-4">Name</dt>
+            <dd class="col-sm-8">
+              {% if '***' in customer.name or '*' in customer.name %}
+                <span class="text-muted font-monospace">{{ customer.name }}</span>
+                <span class="badge bg-warning text-dark ms-1">masked</span>
+              {% else %}
+                {{ customer.name }}
+              {% endif %}
+            </dd>
+
+            <dt class="col-sm-4">MSISDN</dt>
+            <dd class="col-sm-8">
+              {% if '*' in customer.msisdn %}
+                <span class="text-muted font-monospace">{{ customer.msisdn }}</span>
+                <span class="badge bg-warning text-dark ms-1">masked</span>
+              {% else %}
+                {{ customer.msisdn }}
+              {% endif %}
+            </dd>
+
+            <dt class="col-sm-4">Email</dt>
+            <dd class="col-sm-8">
+              {% if '*' in customer.email %}
+                <span class="text-muted font-monospace">{{ customer.email }}</span>
+                <span class="badge bg-warning text-dark ms-1">masked</span>
+              {% else %}
+                {{ customer.email }}
+              {% endif %}
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-md-6">
+      <div class="card shadow-sm h-100">
+        <div class="card-header bg-secondary text-white fw-bold">
+          &#128222; Account
+        </div>
+        <div class="card-body">
+          <dl class="row mb-0">
+            <dt class="col-sm-5">Account ID</dt>
+            <dd class="col-sm-7"><code>{{ customer.account_id }}</code></dd>
+
+            <dt class="col-sm-5">Plan</dt>
+            <dd class="col-sm-7">{{ customer.plan }}</dd>
+
+            <dt class="col-sm-5">Monthly charge</dt>
+            <dd class="col-sm-7">RM {{ "%.2f"|format(customer.monthly_charge) }}</dd>
+
+            <dt class="col-sm-5">Status</dt>
+            <dd class="col-sm-7">
+              {% if customer.status == 'active' %}
+                <span class="badge bg-success">{{ customer.status }}</span>
+              {% else %}
+                <span class="badge bg-danger">{{ customer.status }}</span>
+              {% endif %}
+            </dd>
+
+            <dt class="col-sm-5">City</dt>
+            <dd class="col-sm-7">{{ customer.city }}</dd>
+
+            <dt class="col-sm-5">Data used</dt>
+            <dd class="col-sm-7">{{ customer.data_used_gb }} GB</dd>
+
+            <dt class="col-sm-5">Balance due</dt>
+            <dd class="col-sm-7">
+              {% if customer.outstanding_balance > 0 %}
+                <span class="text-danger fw-bold">RM {{ "%.2f"|format(customer.outstanding_balance) }}</span>
+              {% else %}
+                <span class="text-success">RM 0.00</span>
+              {% endif %}
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── Policy / flow diagram ─────────────────────────────────────────── #}
+  <div class="card mt-4 border-0 bg-light shadow-sm">
+    <div class="card-body">
+      <h6 class="fw-bold mb-3">&#128260; Request flow for this response</h6>
+      <div class="d-flex flex-wrap gap-2 align-items-center font-monospace small">
+        <span class="badge bg-primary p-2">Browser</span>
+        <span>&rarr;</span>
+        <span class="badge bg-secondary p-2">Website (Flask)</span>
+        <span>&rarr; JWT &rarr;</span>
+        <span class="badge bg-dark p-2">Kong Gateway</span>
+        <span>&rarr; introspect &rarr;</span>
+        <span class="badge bg-info text-dark p-2">Keycloak</span>
+        <span>&rarr; policy &rarr;</span>
+        <span class="badge bg-warning text-dark p-2">OPA</span>
+        <span>&rarr;</span>
+        <span class="badge bg-success p-2">CRM</span>
+        <span>&rarr; mask &rarr;</span>
+        <span class="badge bg-danger p-2">Kong masks PII</span>
+      </div>
+    </div>
+  </div>
+
+{% endif %}
+{% endblock %}
