@@ -28,8 +28,8 @@ services:
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
-    image: openpolicyagent/opa:latest-rootless
-    command: run --server --log-level info /policies/policy.rego
+    image: openpolicyagent/opa:latest
+    command: run --server --log-level info --v0-compatible /policies/policy.rego
     volumes:
       - ./opa:/policies
     ports:
@@ -91,7 +91,7 @@ services:
       log-dashboard:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8001/status || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/ -o /dev/null"]
       interval: 10s
       timeout: 5s
       retries: 10
