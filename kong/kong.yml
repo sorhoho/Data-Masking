@@ -60,9 +60,11 @@ plugins:
           local OPA_URL  = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
           local ROLE_PRIORITY = { admin = 3, supervisor = 2, agent = 1 }
 
-          -- Stash for log phase: sandbox blocks require() and os.getenv() there
+          -- Stash for later phases: sandbox blocks require() and cjson global in body_filter/log
           kong.ctx.shared.http_module  = http
           kong.ctx.shared.log_url      = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
+          kong.ctx.shared.json_encode  = cjson.encode
+          kong.ctx.shared.json_decode  = cjson.decode
 
           kong.ctx.shared.token_active = false
           kong.ctx.shared.opa_allowed  = false
@@ -201,7 +203,9 @@ plugins:
           end
       body_filter:
         - |
-          -- cjson is a pre-loaded OpenResty global; require is sandboxed in this phase
+          -- Retrieve cjson functions stashed by access phase (global cjson is sandboxed here)
+          local json_decode   = kong.ctx.shared.json_decode
+          local json_encode   = kong.ctx.shared.json_encode
           local masked_fields = kong.ctx.shared.masked_fields
           if not masked_fields or #masked_fields == 0 then return end
 
@@ -243,7 +247,7 @@ plugins:
           if not eof then return end
 
           local body = kong.ctx.shared.resp_buf
-          local data, err = cjson.decode(body)
+          local data, err = json_decode(body)
           if not data or err then ngx.arg[1] = body; return end
 
           local to_mask = {}
@@ -260,16 +264,17 @@ plugins:
             masked_fields=masked_fields, gateway="kong-opa",
           }
 
-          local out, enc_err = cjson.encode(data)
+          local out, enc_err = json_encode(data)
           if not out then kong.log.err("re-encode error: ", enc_err); ngx.arg[1]=body; return end
           ngx.arg[1] = out
 
       # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
       log:
         - |
-          -- Sandbox blocks require() and os.getenv() in log phase; use stash from access phase
-          local http    = kong.ctx.shared.http_module
-          local LOG_URL = kong.ctx.shared.log_url or "http://log-dashboard:9000/log"
+          -- Sandbox strips cjson global, require(), and os here; use stash from access phase
+          local http        = kong.ctx.shared.http_module
+          local LOG_URL     = kong.ctx.shared.log_url or "http://log-dashboard:9000/log"
+          local json_encode = kong.ctx.shared.json_encode
 
           local status      = kong.response.get_status()
           local username    = kong.ctx.shared.username      or "anonymous"
@@ -294,7 +299,7 @@ plugins:
           elseif status >= 400 then level = "warn"
           else                      level = "info" end
 
-          local entry = cjson.encode({
+          local entry = json_encode and json_encode({
             service="kong", level=level, event="api_request",
             method=method, path=path, customer_id=customer_id,
             http_status=status, user=username, role=user_role,
