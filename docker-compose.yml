@@ -34,12 +34,6 @@ services:
       - ./opa:/policies
     ports:
       - "8181:8181"
-    healthcheck:
-      test: ["CMD", "/opa", "health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
 
   # ── Log Dashboard ─────────────────────────────────────────────────────────
   log-dashboard:
@@ -93,7 +87,7 @@ services:
       crm-mock:
         condition: service_healthy
       opa:
-        condition: service_healthy
+        condition: service_started
       log-dashboard:
         condition: service_healthy
     healthcheck:
