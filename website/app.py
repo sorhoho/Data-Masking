@@ -1,19 +1,37 @@
 import os
 import requests
-from flask import Flask, session, redirect, url_for, request, render_template, jsonify
+from functools import wraps
+from flask import Flask, session, redirect, url_for, render_template
 from authlib.integrations.flask_client import OAuth
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-KEYCLOAK_URL          = os.environ.get("KEYCLOAK_URL",          "http://localhost:8080")
-KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
-KONG_URL              = os.environ.get("KONG_URL",              "http://kong:8000")
-REALM                 = "demo"
+# Trust one layer of reverse-proxy headers (Render's TLS termination).
+# Without this, url_for(..., _external=True) generates http:// instead of https://
+# and authlib's redirect_uri won't match what Keycloak expects.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# ── Keycloak URL resolution ───────────────────────────────────────────────────
+# On Render: KEYCLOAK_HOST is injected via fromService (e.g. keycloak-xxxx.onrender.com)
+#            Both browser redirects and server-side token exchange use the same HTTPS URL.
+# Locally:   KEYCLOAK_HOST is unset; fall back to the two separate env vars so that
+#            the browser goes to localhost:8080 while Flask calls keycloak:8080 internally.
+_keycloak_host = os.environ.get("KEYCLOAK_HOST", "")
+if _keycloak_host:
+    KEYCLOAK_URL          = f"https://{_keycloak_host}"
+    KEYCLOAK_INTERNAL_URL = f"https://{_keycloak_host}"
+else:
+    KEYCLOAK_URL          = os.environ.get("KEYCLOAK_URL",          "http://localhost:8080")
+    KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
+
+KONG_URL = os.environ.get("KONG_URL", "http://kong:8000")
+REALM    = "demo"
 
 # ── Keycloak OIDC client ──────────────────────────────────────────────────────
-# authorize_url   → browser-facing (uses KEYCLOAK_URL = localhost:8080)
-# access_token_url → server-to-server (uses KEYCLOAK_INTERNAL_URL = keycloak:8080)
+# authorize_url    → browser-facing (KEYCLOAK_URL)
+# access_token_url → server-to-server (KEYCLOAK_INTERNAL_URL)
 oauth = OAuth(app)
 oauth.register(
     name="keycloak",
@@ -35,7 +53,6 @@ def current_user():
 
 
 def login_required(f):
-    from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("access_token"):
@@ -62,14 +79,12 @@ def auth_callback():
     token = oauth.keycloak.authorize_access_token()
     access_token = token["access_token"]
 
-    # Fetch userinfo server-side (internal URL)
     ui_resp = requests.get(
         f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/userinfo",
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=8,
     )
     userinfo = ui_resp.json() if ui_resp.ok else {}
-    userinfo["_access_token"] = access_token   # handy for debug panel
 
     session["user"]         = userinfo
     session["access_token"] = access_token

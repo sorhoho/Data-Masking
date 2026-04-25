@@ -1,0 +1,135 @@
+# render.yaml – Render.com Blueprint
+#
+# Topology
+# ────────
+#   PUBLIC (web)   : keycloak, website
+#   PRIVATE (pserv): kong, opa, crm-mock
+#
+# Internal DNS on Render: private services are reachable at
+#   http://<service-name>:<port>   (same names as docker-compose)
+#
+# Post-deploy steps (one-time, after keycloak is live):
+#   1. Copy the Keycloak web-service URL shown in the dashboard
+#      (e.g. https://keycloak-xxxx.onrender.com)
+#   2. In Keycloak service env → set KC_HOSTNAME = keycloak-xxxx.onrender.com
+#   3. Deploy changes – Kong and Website pick up KEYCLOAK_HOST automatically
+#      via the fromService reference below.
+
+services:
+
+  # ── Keycloak Identity Provider ─────────────────────────────────────────────
+  - type: web
+    name: keycloak
+    runtime: docker
+    dockerfilePath: ./keycloak/Dockerfile
+    dockerContext: ./keycloak
+    plan: standard          # Keycloak needs ≥ 512 MB; standard = 2 GB
+    healthCheckPath: /health/ready
+    envVars:
+      - key: KEYCLOAK_ADMIN
+        value: admin
+      - key: KEYCLOAK_ADMIN_PASSWORD
+        generateValue: true
+      - key: KC_DB
+        value: postgres
+      - key: KC_DB_URL_HOST
+        fromDatabase:
+          name: keycloak-db
+          property: host
+      - key: KC_DB_URL_PORT
+        fromDatabase:
+          name: keycloak-db
+          property: port
+      - key: KC_DB_URL_DATABASE
+        fromDatabase:
+          name: keycloak-db
+          property: database
+      - key: KC_DB_USERNAME
+        fromDatabase:
+          name: keycloak-db
+          property: user
+      - key: KC_DB_PASSWORD
+        fromDatabase:
+          name: keycloak-db
+          property: password
+      # Render terminates TLS at the edge and forwards plain HTTP to the container
+      - key: KC_PROXY
+        value: edge
+      - key: KC_HOSTNAME_STRICT
+        value: "false"
+      - key: KC_HOSTNAME_STRICT_HTTPS
+        value: "false"
+      - key: KC_HTTP_ENABLED
+        value: "true"
+      # ⚠ Set this AFTER first deploy to the Keycloak URL (e.g. keycloak-xxxx.onrender.com)
+      - key: KC_HOSTNAME
+        sync: false
+
+  # ── Open Policy Agent (private – only Kong needs it) ──────────────────────
+  - type: pserv
+    name: opa
+    runtime: docker
+    dockerfilePath: ./opa/Dockerfile
+    dockerContext: ./opa
+
+  # ── Mock CRM Backend (private – only Kong needs it) ───────────────────────
+  - type: pserv
+    name: crm-mock
+    runtime: docker
+    dockerfilePath: ./crm-mock/Dockerfile
+    dockerContext: ./crm-mock
+
+  # ── Kong API Gateway (private – only website calls it server-side) ─────────
+  - type: pserv
+    name: kong
+    runtime: docker
+    dockerfilePath: ./kong/Dockerfile
+    dockerContext: ./kong
+    envVars:
+      - key: KONG_DATABASE
+        value: "off"
+      - key: KONG_DECLARATIVE_CONFIG
+        value: /kong/kong.yml
+      - key: KONG_LOG_LEVEL
+        value: info
+      - key: KONG_PLUGINS
+        value: bundled
+      # Trust system CA bundle so Lua HTTP client validates Render's Let's Encrypt certs
+      - key: KONG_LUA_SSL_TRUSTED_CERTIFICATE
+        value: system
+      # Keycloak hostname injected automatically from the keycloak web service
+      - key: KEYCLOAK_HOST
+        fromService:
+          type: web
+          name: keycloak
+          property: host
+      # OPA and CRM are private services – use internal DNS names directly
+      - key: OPA_URL
+        value: "http://opa:8181/v1/data/data_masking"
+
+  # ── Customer Agent Website (public) ────────────────────────────────────────
+  - type: web
+    name: website
+    runtime: docker
+    dockerfilePath: ./website/Dockerfile
+    dockerContext: ./website
+    healthCheckPath: /
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      # Kong is a private service – website calls it server-side
+      - key: KONG_URL
+        value: "http://kong:8000"
+      # Keycloak public hostname injected automatically
+      - key: KEYCLOAK_HOST
+        fromService:
+          type: web
+          name: keycloak
+          property: host
+
+# ── PostgreSQL for Keycloak ─────────────────────────────────────────────────
+databases:
+  - name: keycloak-db
+    databaseName: keycloak
+    user: keycloak
+    plan: free

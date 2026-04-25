@@ -7,11 +7,22 @@
 local http  = require("resty.http")
 local cjson = require("cjson.safe")
 
-local KEYCLOAK_INTROSPECT = "http://keycloak:8080/realms/demo/protocol/openid-connect/token/introspect"
-local KONG_CLIENT_ID      = "kong-client"
-local KONG_CLIENT_SECRET  = "kong-secret-456"
-local OPA_URL             = "http://opa:8181/v1/data/data_masking"
-local ROLE_PRIORITY       = { admin = 3, supervisor = 2, agent = 1 }
+-- On Render, KEYCLOAK_HOST is injected via fromService (e.g. "keycloak-xxxx.onrender.com").
+-- Locally (docker-compose) KEYCLOAK_HOST is unset → fall back to the internal HTTP URL.
+local keycloak_host = os.getenv("KEYCLOAK_HOST") or ""
+local KEYCLOAK_INTROSPECT
+if keycloak_host ~= "" then
+    KEYCLOAK_INTROSPECT = "https://" .. keycloak_host
+        .. "/realms/demo/protocol/openid-connect/token/introspect"
+else
+    KEYCLOAK_INTROSPECT = os.getenv("KEYCLOAK_INTROSPECT_URL")
+        or "http://keycloak:8080/realms/demo/protocol/openid-connect/token/introspect"
+end
+
+local KONG_CLIENT_ID     = "kong-client"
+local KONG_CLIENT_SECRET = "kong-secret-456"
+local OPA_URL            = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
+local ROLE_PRIORITY      = { admin = 3, supervisor = 2, agent = 1 }
 
 local function json_exit(status, msg)
     return kong.response.exit(status, { error = true, message = msg },
@@ -34,11 +45,12 @@ local httpc = http.new()
 httpc:set_timeout(8000)
 
 local res, err = httpc:request_uri(KEYCLOAK_INTROSPECT, {
-    method  = "POST",
-    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
-    body    = "token=" .. token
-           .. "&client_id=" .. KONG_CLIENT_ID
-           .. "&client_secret=" .. KONG_CLIENT_SECRET,
+    method     = "POST",
+    headers    = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body       = "token=" .. token
+              .. "&client_id=" .. KONG_CLIENT_ID
+              .. "&client_secret=" .. KONG_CLIENT_SECRET,
+    ssl_verify = (keycloak_host ~= ""),  -- verify TLS on Render; skip for local HTTP
 })
 
 if not res then

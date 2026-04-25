@@ -20,14 +20,8 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": [
-        "http://localhost:3000/*",
-        "http://website:3000/*"
-      ],
-      "webOrigins": [
-        "http://localhost:3000",
-        "http://website:3000"
-      ],
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
       "fullScopeAllowed": true,
       "defaultClientScopes": ["openid", "profile", "email", "roles"],
       "protocolMappers": [
