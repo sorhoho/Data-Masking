@@ -11,10 +11,10 @@ local function mask_email(v)
     local user, domain = v:match("^([^@]+)@(.+)$")
     if not user then return "***" end
     -- keep first char + last char of local-part, mask the middle
-    local visible = (function()
-        if #user <= 2 then return 1 else return 1 end
-    end)()
-    return user:sub(1, visible) .. string.rep("*", math.max(0, #user - 2)) .. user:sub(-1) .. "@" .. domain
+    if #user <= 2 then
+        return string.rep("*", #user) .. "@" .. domain
+    end
+    return user:sub(1, 1) .. string.rep("*", #user - 2) .. user:sub(-1) .. "@" .. domain
 end
 
 local function mask_msisdn(v)

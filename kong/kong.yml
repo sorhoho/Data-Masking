@@ -31,6 +31,8 @@ plugins:
       headers:
         - Authorization
         - Content-Type
+      exposed_headers:
+        - Content-Type
       credentials: true
       max_age: 3600
 
