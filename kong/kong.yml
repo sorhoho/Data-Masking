@@ -60,6 +60,10 @@ plugins:
           local OPA_URL  = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
           local ROLE_PRIORITY = { admin = 3, supervisor = 2, agent = 1 }
 
+          -- Stash for log phase: sandbox blocks require() and os.getenv() there
+          kong.ctx.shared.http_module  = http
+          kong.ctx.shared.log_url      = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
+
           kong.ctx.shared.token_active = false
           kong.ctx.shared.opa_allowed  = false
           kong.ctx.shared.deny_reason  = nil
@@ -263,10 +267,9 @@ plugins:
       # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
       log:
         - |
-          -- resty.http is available from require cache; cjson is a pre-loaded OpenResty global
-          local ok_http, http = pcall(require, "resty.http")
-
-          local LOG_URL = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
+          -- Sandbox blocks require() and os.getenv() in log phase; use stash from access phase
+          local http    = kong.ctx.shared.http_module
+          local LOG_URL = kong.ctx.shared.log_url or "http://log-dashboard:9000/log"
 
           local status      = kong.response.get_status()
           local username    = kong.ctx.shared.username      or "anonymous"
@@ -299,14 +302,19 @@ plugins:
             masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
           })
 
-          if ok_http then
-            local ok2, httpc = pcall(http.new)
-            if ok2 then
-              httpc:set_timeout(500)
-              pcall(function()
-                httpc:request_uri(LOG_URL, {
-                  method="POST", headers={["Content-Type"]="application/json"}, body=entry,
-                })
-              end)
-            end
+          -- Fire-and-forget via timer: log phase forbids cosockets directly,
+          -- but timer callbacks run in a separate thread where cosockets are allowed.
+          if http and entry then
+            ngx.timer.at(0, function(premature, payload, url, http_mod)
+              if premature then return end
+              local ok, httpc = pcall(function() return http_mod.new() end)
+              if ok and httpc then
+                httpc:set_timeout(500)
+                pcall(function()
+                  httpc:request_uri(url, {
+                    method="POST", headers={["Content-Type"]="application/json"}, body=payload,
+                  })
+                end)
+              end
+            end, entry, LOG_URL, http)
           end
