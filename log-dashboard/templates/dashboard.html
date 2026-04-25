@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Log Dashboard – Data Masking</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.header {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+.header h1 { font-size: 15px; color: #e6edf3; white-space: nowrap; }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #3fb950;
+  animation: pulse 2s infinite;
+  flex-shrink: 0;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+.live-label { font-size: 11px; color: #3fb950; }
+.spacer { flex: 1; }
+.autoscroll-label {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: #8b949e; cursor: pointer; user-select: none;
+}
+.btn { padding: 3px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+.btn-danger { border: 1px solid #f85149; background: transparent; color: #f85149; }
+.btn-danger:hover { background: #2d0000; }
+
+/* ── Pipeline bar ──────────────────────────────────────────────────────── */
+.pipeline {
+  background: #0d1117;
+  border-bottom: 1px solid #21262d;
+  padding: 6px 18px;
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; overflow-x: auto; flex-shrink: 0;
+  white-space: nowrap;
+}
+.pipe-step {
+  padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: bold;
+}
+.pipe-arrow { color: #30363d; }
+.ps-browser  { background:#1a2d1a; color:#3fb950; border:1px solid #238636; }
+.ps-website  { background:#1a2d1a; color:#3fb950; border:1px solid #238636; }
+.ps-kong     { background:#1c2a3f; color:#58a6ff; border:1px solid #1f6feb; }
+.ps-keycloak { background:#192338; color:#79c0ff; border:1px solid #388bfd; }
+.ps-opa      { background:#2a1f47; color:#bc8cff; border:1px solid #8957e5; }
+.ps-crm      { background:#2d1f00; color:#e3b341; border:1px solid #9e6a03; }
+
+/* ── Stats ─────────────────────────────────────────────────────────────── */
+.stats {
+  display: flex; gap: 1px; background: #30363d;
+  border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+.stat-card {
+  flex: 1; background: #0d1117;
+  padding: 10px 18px; text-align: center;
+}
+.stat-value { font-size: 22px; font-weight: bold; color: #e6edf3; }
+.stat-label { font-size: 10px; color: #484f58; margin-top: 2px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* ── Filters ───────────────────────────────────────────────────────────── */
+.filters {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 7px 14px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0;
+}
+.filter-group-label { font-size: 10px; color: #484f58; text-transform: uppercase; letter-spacing: .06em; }
+.filter-btn {
+  padding: 2px 10px; border-radius: 10px;
+  border: 1px solid #30363d; background: transparent;
+  color: #8b949e; cursor: pointer; font-size: 11px;
+}
+.filter-btn.active { background: #21262d; color: #e6edf3; border-color: #58a6ff; }
+.filter-sep { width: 1px; height: 18px; background: #30363d; }
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+.log-container { flex: 1; overflow-y: auto; }
+
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  background: #161b22; color: #484f58;
+  padding: 5px 12px; text-align: left;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  border-bottom: 1px solid #30363d;
+  position: sticky; top: 0; z-index: 1;
+}
+tbody tr { border-bottom: 1px solid #161b22; }
+tbody tr:hover { background: #161b22; }
+tbody tr.row-warn  { border-left: 3px solid #d29922; }
+tbody tr.row-error { border-left: 3px solid #f85149; }
+tbody td { padding: 4px 12px; vertical-align: middle; }
+
+/* ── Badges ────────────────────────────────────────────────────────────── */
+.badge {
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: bold; letter-spacing: .04em;
+  display: inline-block;
+}
+.b-website  { background:#1a2d1a; color:#3fb950; border:1px solid #238636; }
+.b-kong     { background:#1c2a3f; color:#58a6ff; border:1px solid #1f6feb; }
+.b-crm-mock { background:#2d1f00; color:#e3b341; border:1px solid #9e6a03; }
+.b-opa      { background:#2a1f47; color:#bc8cff; border:1px solid #8957e5; }
+.b-unknown  { background:#21262d; color:#8b949e; border:1px solid #30363d; }
+
+/* ── Detail tokens ─────────────────────────────────────────────────────── */
+.tc   { color: #484f58; }          /* dim column */
+.ev   { color: #e6edf3; }          /* event name */
+.v-ok { color: #3fb950; }          /* green: valid / allow / ok */
+.v-no { color: #f85149; }          /* red: invalid / deny / error */
+.v-wr { color: #d29922; }          /* yellow: warn */
+.v-u  { color: #79c0ff; }          /* blue: user/role values */
+.masked-pill {
+  display: inline-block; padding: 0 5px; margin-left: 2px;
+  border-radius: 3px; background: #3d2e00; color: #e3b341;
+  border: 1px solid #9e6a03; font-size: 10px;
+}
+.dot  { color: #30363d; margin: 0 4px; }
+
+/* ── Empty state ───────────────────────────────────────────────────────── */
+.empty-state {
+  text-align: center; padding: 80px 20px; color: #484f58;
+  font-size: 12px; line-height: 2;
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>&#128274; Data Masking &mdash; Log Dashboard</h1>
+  <div class="live-dot"></div>
+  <span class="live-label">LIVE</span>
+  <div class="spacer"></div>
+  <label class="autoscroll-label">
+    <input type="checkbox" id="autoscroll" checked /> auto-scroll
+  </label>
+  <button class="btn btn-danger" onclick="clearLogs()">Clear</button>
+</div>
+
+<!-- Pipeline -->
+<div class="pipeline">
+  <span style="color:#484f58">pipeline:</span>
+  <span class="pipe-step ps-browser">Browser</span><span class="pipe-arrow">→</span>
+  <span class="pipe-step ps-website">Website</span><span class="pipe-arrow">—JWT→</span>
+  <span class="pipe-step ps-kong">Kong</span><span class="pipe-arrow">—introspect→</span>
+  <span class="pipe-step ps-keycloak">Keycloak</span><span class="pipe-arrow">—policy→</span>
+  <span class="pipe-step ps-opa">OPA</span><span class="pipe-arrow">—fetch→</span>
+  <span class="pipe-step ps-crm">CRM</span><span class="pipe-arrow">—mask→</span>
+  <span class="pipe-step ps-kong">Kong</span><span class="pipe-arrow">→</span>
+  <span class="pipe-step ps-website">Website</span>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-value" id="s-total">0</div>
+    <div class="stat-label">Total Events</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="s-req">0</div>
+    <div class="stat-label">API Requests</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" style="color:#e3b341" id="s-mask">0</div>
+    <div class="stat-label">Masking Events</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" style="color:#f85149" id="s-err">0</div>
+    <div class="stat-label">Denied / Errors</div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="filters">
+  <span class="filter-group-label">service</span>
+  <button class="filter-btn active" data-filter="service" data-value="all">all</button>
+  <button class="filter-btn" data-filter="service" data-value="website">website</button>
+  <button class="filter-btn" data-filter="service" data-value="kong">kong</button>
+  <button class="filter-btn" data-filter="service" data-value="crm-mock">crm-mock</button>
+  <div class="filter-sep"></div>
+  <span class="filter-group-label">level</span>
+  <button class="filter-btn active" data-filter="level" data-value="all">all</button>
+  <button class="filter-btn" data-filter="level" data-value="info">info</button>
+  <button class="filter-btn" data-filter="level" data-value="warn">warn</button>
+  <button class="filter-btn" data-filter="level" data-value="error">error</button>
+</div>
+
+<!-- Log table -->
+<div class="log-container" id="log-container">
+  <div id="empty-state" class="empty-state">
+    No log events yet.<br/>
+    Start the stack with <code>docker compose up</code>, log in, and search for a customer.
+  </div>
+  <table id="log-table" style="display:none">
+    <thead>
+      <tr>
+        <th style="width:72px">Time</th>
+        <th style="width:86px">Service</th>
+        <th style="width:160px">Event</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody id="log-body"></tbody>
+  </table>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────
+const filters = { service: 'all', level: 'all' };
+const stats   = { total: 0, req: 0, mask: 0, err: 0 };
+
+// ── Service badge ─────────────────────────────────────────────────────────
+function badge(svc) {
+  const cls = ['website','kong','crm-mock'].includes(svc) ? `b-${svc}` : 'b-unknown';
+  return `<span class="badge ${cls}">${(svc||'?').toUpperCase()}</span>`;
+}
+
+// ── Build detail HTML from a log entry ───────────────────────────────────
+function details(e) {
+  const p = [];
+
+  if (e.user)        p.push(`user=<span class="v-u">${e.user}</span>`);
+  if (e.role)        p.push(`role=<span class="v-u">${e.role}</span>`);
+  if (e.customer_id) p.push(`customer=<span class="ev">${e.customer_id}</span>`);
+
+  if (e.token_active !== undefined)
+    p.push(`token=<span class="${e.token_active?'v-ok':'v-no'}">${e.token_active?'valid':'invalid'}</span>`);
+
+  if (e.opa_decision !== undefined)
+    p.push(`opa=<span class="${e.opa_decision==='ALLOW'?'v-ok':'v-no'}">${e.opa_decision}</span>`);
+
+  if (e.decision !== undefined)
+    p.push(`decision=<span class="${e.decision==='ALLOW'?'v-ok':'v-no'}">${e.decision}</span>`);
+
+  if (e.http_status) {
+    const ok = e.http_status < 400;
+    p.push(`status=<span class="${ok?'v-ok':'v-no'}">${e.http_status}</span>`);
+  }
+
+  if (e.masked_fields && e.masked_fields.length > 0) {
+    const pills = e.masked_fields.map(f=>`<span class="masked-pill">${f}</span>`).join('');
+    p.push(`masked${pills}`);
+  } else if (e.masked_fields && e.masked_fields.length === 0 && e.service === 'kong') {
+    p.push(`<span class="v-ok">no masking</span>`);
+  }
+
+  if (e.found !== undefined)
+    p.push(`found=<span class="${e.found?'v-ok':'v-no'}">${e.found}</span>`);
+
+  if (e.deny_reason)
+    p.push(`reason=<span class="v-no">${e.deny_reason}</span>`);
+
+  if (e.roles && e.roles.length)
+    p.push(`roles=<span class="v-u">[${e.roles.join(',')}]</span>`);
+
+  if (e.error)
+    p.push(`<span class="v-no">${e.error}</span>`);
+
+  return p.map((s,i) => i===0 ? s : `<span class="dot">·</span>${s}`).join('');
+}
+
+// ── Build a table row ─────────────────────────────────────────────────────
+function buildRow(e) {
+  const lvlCls = e.level==='error' ? 'row-error' : e.level==='warn' ? 'row-warn' : '';
+  const tr = document.createElement('tr');
+  tr.className = lvlCls;
+  tr.dataset.service = e.service || 'unknown';
+  tr.dataset.level   = e.level   || 'info';
+  tr.innerHTML = `
+    <td class="tc">${e.timestamp||''}</td>
+    <td>${badge(e.service)}</td>
+    <td class="ev">${e.event||''}</td>
+    <td>${details(e)}</td>`;
+  return tr;
+}
+
+// ── Filter ────────────────────────────────────────────────────────────────
+function rowVisible(tr) {
+  if (filters.service !== 'all' && tr.dataset.service !== filters.service) return false;
+  if (filters.level   !== 'all' && tr.dataset.level   !== filters.level)   return false;
+  return true;
+}
+function applyFilters() {
+  for (const tr of document.querySelectorAll('#log-body tr'))
+    tr.style.display = rowVisible(tr) ? '' : 'none';
+  syncEmpty();
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────
+function tick(e) {
+  stats.total++;
+  if (e.service==='kong' && e.event==='api_request') stats.req++;
+  if (e.masked_fields && e.masked_fields.length > 0) stats.mask++;
+  if ((e.http_status && e.http_status>=400) || e.opa_decision==='DENY' || e.level==='error') stats.err++;
+  document.getElementById('s-total').textContent = stats.total;
+  document.getElementById('s-req').textContent   = stats.req;
+  document.getElementById('s-mask').textContent  = stats.mask;
+  document.getElementById('s-err').textContent   = stats.err;
+}
+
+// ── Append ────────────────────────────────────────────────────────────────
+function append(e) {
+  tick(e);
+  const tr = buildRow(e);
+  tr.style.display = rowVisible(tr) ? '' : 'none';
+  document.getElementById('log-body').appendChild(tr);
+  syncEmpty();
+  if (document.getElementById('autoscroll').checked) {
+    const c = document.getElementById('log-container');
+    c.scrollTop = c.scrollHeight;
+  }
+}
+
+// ── Empty state ───────────────────────────────────────────────────────────
+function syncEmpty() {
+  const has = [...document.querySelectorAll('#log-body tr')].some(r=>r.style.display!=='none');
+  document.getElementById('empty-state').style.display = has ? 'none' : '';
+  document.getElementById('log-table').style.display   = has ? ''     : 'none';
+}
+
+// ── Clear ─────────────────────────────────────────────────────────────────
+async function clearLogs() {
+  await fetch('/clear', {method:'POST'});
+  document.getElementById('log-body').innerHTML = '';
+  Object.assign(stats, {total:0, req:0, mask:0, err:0});
+  ['s-total','s-req','s-mask','s-err'].forEach(id => document.getElementById(id).textContent='0');
+  syncEmpty();
+}
+
+// ── Filter buttons ────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll(`[data-filter="${this.dataset.filter}"]`).forEach(b=>b.classList.remove('active'));
+    this.classList.add('active');
+    filters[this.dataset.filter] = this.dataset.value;
+    applyFilters();
+  });
+});
+
+// ── SSE ───────────────────────────────────────────────────────────────────
+function connect() {
+  const es = new EventSource('/stream');
+  es.onmessage = e => append(JSON.parse(e.data));
+  es.onerror   = () => setTimeout(connect, 3000);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+fetch('/logs')
+  .then(r => r.json())
+  .then(logs => { logs.forEach(append); connect(); });
+</script>
+</body>
+</html>

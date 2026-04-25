@@ -1,4 +1,5 @@
 import os
+import threading
 import requests
 from functools import wraps
 from flask import Flask, session, redirect, url_for, render_template
@@ -8,30 +9,38 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-# Trust one layer of reverse-proxy headers (Render's TLS termination).
-# Without this, url_for(..., _external=True) generates http:// instead of https://
-# and authlib's redirect_uri won't match what Keycloak expects.
+# Trust one layer of reverse-proxy headers (needed on Render / behind nginx).
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# ── Keycloak URL resolution ───────────────────────────────────────────────────
-# On Render: KEYCLOAK_HOST is injected via fromService (e.g. keycloak-xxxx.onrender.com)
-#            Both browser redirects and server-side token exchange use the same HTTPS URL.
-# Locally:   KEYCLOAK_HOST is unset; fall back to the two separate env vars so that
-#            the browser goes to localhost:8080 while Flask calls keycloak:8080 internally.
-_keycloak_host = os.environ.get("KEYCLOAK_HOST", "")
-if _keycloak_host:
-    KEYCLOAK_URL          = f"https://{_keycloak_host}"
-    KEYCLOAK_INTERNAL_URL = f"https://{_keycloak_host}"
+# ── URL resolution ────────────────────────────────────────────────────────────
+# On Render KEYCLOAK_HOST is injected via fromService; locally fall back to the
+# two separate env vars so browser→Keycloak and server→Keycloak use the right URLs.
+_kc_host = os.environ.get("KEYCLOAK_HOST", "")
+if _kc_host:
+    KEYCLOAK_URL          = f"https://{_kc_host}"
+    KEYCLOAK_INTERNAL_URL = f"https://{_kc_host}"
 else:
     KEYCLOAK_URL          = os.environ.get("KEYCLOAK_URL",          "http://localhost:8080")
     KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
 
-KONG_URL = os.environ.get("KONG_URL", "http://kong:8000")
-REALM    = "demo"
+KONG_URL          = os.environ.get("KONG_URL",          "http://kong:8000")
+LOG_DASHBOARD_URL = os.environ.get("LOG_DASHBOARD_URL", "http://log-dashboard:9000/log")
+REALM             = "demo"
+
+# ── Logging helper ────────────────────────────────────────────────────────────
+def _fire(entry):
+    try:
+        requests.post(LOG_DASHBOARD_URL, json=entry, timeout=0.5)
+    except Exception:
+        pass
+
+def log_event(level, event, **kw):
+    """Fire-and-forget – never blocks the request."""
+    entry = {"service": "website", "level": level, "event": event, **kw}
+    threading.Thread(target=_fire, args=(entry,), daemon=True).start()
+
 
 # ── Keycloak OIDC client ──────────────────────────────────────────────────────
-# authorize_url    → browser-facing (KEYCLOAK_URL)
-# access_token_url → server-to-server (KEYCLOAK_INTERNAL_URL)
 oauth = OAuth(app)
 oauth.register(
     name="keycloak",
@@ -76,10 +85,10 @@ def login():
 
 @app.get("/auth/callback")
 def auth_callback():
-    token = oauth.keycloak.authorize_access_token()
+    token        = oauth.keycloak.authorize_access_token()
     access_token = token["access_token"]
 
-    ui_resp = requests.get(
+    ui_resp  = requests.get(
         f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/userinfo",
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=8,
@@ -88,11 +97,17 @@ def auth_callback():
 
     session["user"]         = userinfo
     session["access_token"] = access_token
+
+    log_event("info", "user_login",
+              user=userinfo.get("preferred_username"),
+              roles=userinfo.get("roles", []))
     return redirect(url_for("search"))
 
 
 @app.get("/logout")
 def logout():
+    user = current_user() or {}
+    log_event("info", "user_logout", user=user.get("preferred_username"))
     session.clear()
     logout_url = (
         f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/logout"
@@ -112,7 +127,12 @@ def search():
 @app.get("/customer/<customer_id>")
 @login_required
 def customer_detail(customer_id):
+    user         = current_user() or {}
+    username     = user.get("preferred_username", "unknown")
     access_token = session["access_token"]
+
+    log_event("info", "crm_request", user=username, customer_id=customer_id)
+
     try:
         resp = requests.get(
             f"{KONG_URL}/api/customer/{customer_id}",
@@ -120,32 +140,38 @@ def customer_detail(customer_id):
             timeout=10,
         )
         if resp.status_code == 200:
-            return render_template(
-                "customer.html",
-                customer=resp.json(),
-                error=None,
-                user=current_user(),
-                customer_id=customer_id,
-            )
+            data    = resp.json()
+            masking = data.get("_masking", {})
+            log_event("info", "crm_response",
+                      user=username,
+                      customer_id=customer_id,
+                      http_status=200,
+                      masked_fields=masking.get("masked_fields", []))
+            return render_template("customer.html",
+                                   customer=data, error=None,
+                                   user=current_user(), customer_id=customer_id)
+
         if resp.status_code in (401, 403):
             err_body = resp.json() if resp.content else {}
-            error = err_body.get("message", f"HTTP {resp.status_code}: Access denied")
+            error    = err_body.get("message", f"HTTP {resp.status_code}: Access denied")
+            log_event("warn", "crm_denied",
+                      user=username, customer_id=customer_id,
+                      http_status=resp.status_code, error=error)
         elif resp.status_code == 404:
             error = f"Customer '{customer_id}' not found in CRM"
         else:
             error = f"Upstream error – HTTP {resp.status_code}"
+
     except requests.exceptions.ConnectionError:
         error = "Cannot reach Kong API Gateway. Is it running?"
+        log_event("error", "kong_unreachable", user=username, customer_id=customer_id)
     except requests.exceptions.Timeout:
         error = "Request timed out."
+        log_event("error", "kong_timeout", user=username, customer_id=customer_id)
 
-    return render_template(
-        "customer.html",
-        customer=None,
-        error=error,
-        user=current_user(),
-        customer_id=customer_id,
-    )
+    return render_template("customer.html",
+                           customer=None, error=error,
+                           user=current_user(), customer_id=customer_id)
 
 
 if __name__ == "__main__":

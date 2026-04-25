@@ -41,11 +41,28 @@ services:
       retries: 10
       start_period: 5s
 
+  # ── Log Dashboard ─────────────────────────────────────────────────────────
+  log-dashboard:
+    build: ./log-dashboard
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   # ── Mock CRM Backend ──────────────────────────────────────────────────────
   crm-mock:
     build: ./crm-mock
+    environment:
+      LOG_DASHBOARD_URL: http://log-dashboard:9000/log
     ports:
       - "5001:5000"
+    depends_on:
+      log-dashboard:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5000/health || exit 1"]
       interval: 5s
@@ -66,6 +83,7 @@ services:
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_ADMIN_ERROR_LOG: /dev/stderr
       KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      LOG_DASHBOARD_URL: http://log-dashboard:9000/log
     volumes:
       - ./kong:/kong
     ports:
@@ -75,6 +93,8 @@ services:
       crm-mock:
         condition: service_healthy
       opa:
+        condition: service_healthy
+      log-dashboard:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8001/status || exit 1"]
@@ -92,11 +112,14 @@ services:
       KEYCLOAK_URL: "http://localhost:8080"
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KONG_URL: "http://kong:8000"
+      LOG_DASHBOARD_URL: "http://log-dashboard:9000/log"
       SECRET_KEY: "demo-secret-change-in-production"
     depends_on:
       kong:
         condition: service_healthy
       keycloak:
+        condition: service_healthy
+      log-dashboard:
         condition: service_healthy
 
 networks:

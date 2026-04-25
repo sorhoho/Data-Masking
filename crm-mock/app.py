@@ -1,6 +1,11 @@
-from flask import Flask, jsonify
+import os
+import threading
+import requests as req_lib
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+
+LOG_DASHBOARD_URL = os.environ.get("LOG_DASHBOARD_URL", "http://log-dashboard:9000/log")
 
 CUSTOMERS = {
     "C001": {
@@ -66,6 +71,18 @@ CUSTOMERS = {
 }
 
 
+def _fire(entry):
+    try:
+        req_lib.post(LOG_DASHBOARD_URL, json=entry, timeout=0.5)
+    except Exception:
+        pass
+
+
+def log_event(level, event, **kw):
+    entry = {"service": "crm-mock", "level": level, "event": event, **kw}
+    threading.Thread(target=_fire, args=(entry,), daemon=True).start()
+
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -75,7 +92,12 @@ def health():
 def get_customer(customer_id):
     customer = CUSTOMERS.get(customer_id)
     if not customer:
+        log_event("warn", "customer_fetched",
+                  customer_id=customer_id, found=False, http_status=404)
         return jsonify({"error": "Customer not found", "id": customer_id}), 404
+    log_event("info", "customer_fetched",
+              customer_id=customer_id, found=True,
+              plan=customer["plan"], status=customer["status"], http_status=200)
     return jsonify(customer)
 
 

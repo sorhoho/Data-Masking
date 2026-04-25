@@ -56,3 +56,7 @@ plugins:
       body_filter:
         - |
           dofile("/kong/plugins/masking.lua")
+      # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
+      log:
+        - |
+          dofile("/kong/plugins/logger.lua")
