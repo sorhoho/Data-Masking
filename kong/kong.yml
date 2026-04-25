@@ -197,8 +197,7 @@ plugins:
           end
       body_filter:
         - |
-          local cjson = require("cjson.safe")
-
+          -- cjson is a pre-loaded OpenResty global; require is sandboxed in this phase
           local masked_fields = kong.ctx.shared.masked_fields
           if not masked_fields or #masked_fields == 0 then return end
 
@@ -264,8 +263,8 @@ plugins:
       # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
       log:
         - |
-          local http  = require("resty.http")
-          local cjson = require("cjson.safe")
+          -- resty.http is available from require cache; cjson is a pre-loaded OpenResty global
+          local ok_http, http = pcall(require, "resty.http")
 
           local LOG_URL = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
 
@@ -300,12 +299,14 @@ plugins:
             masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
           })
 
-          local ok, httpc = pcall(http.new)
-          if ok then
-            httpc:set_timeout(500)
-            pcall(function()
-              httpc:request_uri(LOG_URL, {
-                method="POST", headers={["Content-Type"]="application/json"}, body=entry,
-              })
-            end)
+          if ok_http then
+            local ok2, httpc = pcall(http.new)
+            if ok2 then
+              httpc:set_timeout(500)
+              pcall(function()
+                httpc:request_uri(LOG_URL, {
+                  method="POST", headers={["Content-Type"]="application/json"}, body=entry,
+                })
+              end)
+            end
           end
