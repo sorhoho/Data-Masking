@@ -60,10 +60,6 @@ plugins:
           local OPA_URL  = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
           local ROLE_PRIORITY = { admin = 3, supervisor = 2, agent = 1 }
 
-          -- Stash cjson functions: sandbox strips the cjson global in body_filter/log phases
-          kong.ctx.shared.json_encode = cjson.encode
-          kong.ctx.shared.json_decode = cjson.decode
-
           kong.ctx.shared.token_active = false
           kong.ctx.shared.opa_allowed  = false
           kong.ctx.shared.deny_reason  = nil
@@ -201,9 +197,6 @@ plugins:
           end
       body_filter:
         - |
-          -- Retrieve cjson functions stashed by access phase (global cjson is sandboxed here)
-          local json_decode   = kong.ctx.shared.json_decode
-          local json_encode   = kong.ctx.shared.json_encode
           local masked_fields = kong.ctx.shared.masked_fields
           if not masked_fields or #masked_fields == 0 then return end
 
@@ -245,7 +238,7 @@ plugins:
           if not eof then return end
 
           local body = kong.ctx.shared.resp_buf
-          local data, err = json_decode(body)
+          local data, err = cjson.decode(body)
           if not data or err then ngx.arg[1] = body; return end
 
           local to_mask = {}
@@ -262,18 +255,16 @@ plugins:
             masked_fields=masked_fields, gateway="kong-opa",
           }
 
-          local out, enc_err = json_encode(data)
+          local out, enc_err = cjson.encode(data)
           if not out then kong.log.err("re-encode error: ", enc_err); ngx.arg[1]=body; return end
           ngx.arg[1] = out
 
       # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
       log:
         - |
-          -- Sandbox strips cjson global, require(), and os here; use stash from access phase.
-          -- Emit as structured JSON to Kong's log (stdout) instead of POSTing to log-dashboard
-          -- to avoid resty.http sandbox restrictions in this phase entirely.
-          local json_encode = kong.ctx.shared.json_encode
-          if not json_encode then return end
+          local http  = require("resty.http")
+          local cjson = require("cjson.safe")
+          local LOG_URL = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
 
           local status      = kong.response.get_status()
           local username    = kong.ctx.shared.username      or "anonymous"
@@ -298,7 +289,7 @@ plugins:
           elseif status >= 400 then level = "warn"
           else                      level = "info" end
 
-          local entry = json_encode({
+          local entry = cjson.encode({
             service="kong", level=level, event="api_request",
             method=method, path=path, customer_id=customer_id,
             http_status=status, user=username, role=user_role,
@@ -306,4 +297,12 @@ plugins:
             masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
           })
 
-          if entry then kong.log.info(entry) end
+          local ok, httpc = pcall(http.new)
+          if ok then
+            httpc:set_timeout(500)
+            pcall(function()
+              httpc:request_uri(LOG_URL, {
+                method="POST", headers={["Content-Type"]="application/json"}, body=entry,
+              })
+            end)
+          end
