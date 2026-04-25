@@ -28,7 +28,7 @@ services:
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
-    image: openpolicyagent/opa:1.2.0-rootless
+    image: openpolicyagent/opa:latest-rootless
     command: run --server --log-level info /policies/policy.rego
     volumes:
       - ./opa:/policies
