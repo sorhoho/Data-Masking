@@ -35,7 +35,7 @@ services:
     ports:
       - "8181:8181"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8181/health || exit 1"]
+      test: ["CMD", "/opa", "health"]
       interval: 5s
       timeout: 5s
       retries: 10
