@@ -60,11 +60,9 @@ plugins:
           local OPA_URL  = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
           local ROLE_PRIORITY = { admin = 3, supervisor = 2, agent = 1 }
 
-          -- Stash for later phases: sandbox blocks require() and cjson global in body_filter/log
-          kong.ctx.shared.http_module  = http
-          kong.ctx.shared.log_url      = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
-          kong.ctx.shared.json_encode  = cjson.encode
-          kong.ctx.shared.json_decode  = cjson.decode
+          -- Stash cjson functions: sandbox strips the cjson global in body_filter/log phases
+          kong.ctx.shared.json_encode = cjson.encode
+          kong.ctx.shared.json_decode = cjson.decode
 
           kong.ctx.shared.token_active = false
           kong.ctx.shared.opa_allowed  = false
@@ -271,10 +269,11 @@ plugins:
       # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
       log:
         - |
-          -- Sandbox strips cjson global, require(), and os here; use stash from access phase
-          local http        = kong.ctx.shared.http_module
-          local LOG_URL     = kong.ctx.shared.log_url or "http://log-dashboard:9000/log"
+          -- Sandbox strips cjson global, require(), and os here; use stash from access phase.
+          -- Emit as structured JSON to Kong's log (stdout) instead of POSTing to log-dashboard
+          -- to avoid resty.http sandbox restrictions in this phase entirely.
           local json_encode = kong.ctx.shared.json_encode
+          if not json_encode then return end
 
           local status      = kong.response.get_status()
           local username    = kong.ctx.shared.username      or "anonymous"
@@ -299,7 +298,7 @@ plugins:
           elseif status >= 400 then level = "warn"
           else                      level = "info" end
 
-          local entry = json_encode and json_encode({
+          local entry = json_encode({
             service="kong", level=level, event="api_request",
             method=method, path=path, customer_id=customer_id,
             http_status=status, user=username, role=user_role,
@@ -307,19 +306,4 @@ plugins:
             masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
           })
 
-          -- Fire-and-forget via timer: log phase forbids cosockets directly,
-          -- but timer callbacks run in a separate thread where cosockets are allowed.
-          if http and entry then
-            ngx.timer.at(0, function(premature, payload, url, http_mod)
-              if premature then return end
-              local ok, httpc = pcall(function() return http_mod.new() end)
-              if ok and httpc then
-                httpc:set_timeout(500)
-                pcall(function()
-                  httpc:request_uri(url, {
-                    method="POST", headers={["Content-Type"]="application/json"}, body=payload,
-                  })
-                end)
-              end
-            end, entry, LOG_URL, http)
-          end
+          if entry then kong.log.info(entry) end
