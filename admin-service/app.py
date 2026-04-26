@@ -172,9 +172,11 @@ def dashboard():
         "SELECT * FROM sync_log ORDER BY id DESC LIMIT 5"
     ).fetchall()
     conn.close()
+    total_mask_count = sum(len(v) for v in config["role_masked_fields"].values())
     return render_template("dashboard.html",
                            config=config, recent_syncs=recent_syncs,
-                           fields=FIELDS, roles=ROLES)
+                           fields=FIELDS, roles=ROLES,
+                           total_mask_count=total_mask_count)
 
 
 @app.get("/health")
