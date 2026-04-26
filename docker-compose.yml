@@ -20,11 +20,11 @@ services:
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/master || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/demo || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
-      start_period: 60s
+      start_period: 90s
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
