@@ -8,7 +8,6 @@
   "duplicateEmailsAllowed": false,
   "accessTokenLifespan": 3600,
   "ssoSessionMaxLifespan": 36000,
-
   "clients": [
     {
       "clientId": "website-client",
@@ -20,10 +19,19 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["*"],
-      "webOrigins": ["*"],
+      "redirectUris": [
+        "*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
       "fullScopeAllowed": true,
-      "defaultClientScopes": ["openid", "profile", "email", "roles"],
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
       "protocolMappers": [
         {
           "name": "realm-roles-mapper",
@@ -39,7 +47,10 @@
             "userinfo.token.claim": "true"
           }
         }
-      ]
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "*"
+      }
     },
     {
       "clientId": "kong-client",
@@ -53,15 +64,22 @@
       "serviceAccountsEnabled": true
     }
   ],
-
   "roles": {
     "realm": [
-      { "name": "agent",      "description": "Customer service agent – sees masked PII" },
-      { "name": "supervisor", "description": "Team supervisor – sees partial PII"        },
-      { "name": "admin",      "description": "System admin – sees all data unmasked"     }
+      {
+        "name": "agent",
+        "description": "Customer service agent \u2013 sees masked PII"
+      },
+      {
+        "name": "supervisor",
+        "description": "Team supervisor \u2013 sees partial PII"
+      },
+      {
+        "name": "admin",
+        "description": "System admin \u2013 sees all data unmasked"
+      }
     ]
   },
-
   "users": [
     {
       "username": "agent1",
@@ -70,8 +88,16 @@
       "lastName": "Agent",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "agent123", "temporary": false }],
-      "realmRoles": ["agent"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "agent123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent"
+      ]
     },
     {
       "username": "supervisor1",
@@ -80,8 +106,16 @@
       "lastName": "Supervisor",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "super123", "temporary": false }],
-      "realmRoles": ["supervisor"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "super123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "supervisor"
+      ]
     },
     {
       "username": "admin1",
@@ -90,8 +124,16 @@
       "lastName": "Admin",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
-      "realmRoles": ["admin"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin"
+      ]
     }
   ]
 }

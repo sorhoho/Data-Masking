@@ -97,6 +97,7 @@ def auth_callback():
 
     session["user"]         = userinfo
     session["access_token"] = access_token
+    session["id_token"]     = token.get("id_token", "")
 
     log_event("info", "user_login",
               user=userinfo.get("preferred_username"),
@@ -106,12 +107,15 @@ def auth_callback():
 
 @app.get("/logout")
 def logout():
-    user = current_user() or {}
+    user      = current_user() or {}
+    id_token  = session.get("id_token", "")
     log_event("info", "user_logout", user=user.get("preferred_username"))
     session.clear()
+    # Keycloak 23+ uses post_logout_redirect_uri + id_token_hint (old redirect_uri rejected)
     logout_url = (
         f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/logout"
-        f"?redirect_uri={url_for('index', _external=True)}"
+        f"?post_logout_redirect_uri={url_for('index', _external=True)}"
+        f"&id_token_hint={id_token}"
     )
     return redirect(logout_url)
 
@@ -137,7 +141,7 @@ def customer_detail(customer_id):
         resp = requests.get(
             f"{KONG_URL}/api/customer/{customer_id}",
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=10,
+            timeout=30,
         )
         if resp.status_code == 200:
             data    = resp.json()
@@ -195,7 +199,7 @@ def reveal_customer(customer_id):
                 "Authorization": f"Bearer {access_token}",
                 "X-Unmask-Reason": reason,
             },
-            timeout=10,
+            timeout=30,
         )
         if resp.status_code == 200:
             log_event("warn", "unmask_success",

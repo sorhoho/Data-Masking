@@ -91,12 +91,15 @@ plugins:
           httpc:set_timeout(8000)
 
           local res, err = httpc:request_uri(KEYCLOAK_INTROSPECT, {
-              method  = "POST",
-              headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
-              body    = "token=" .. token
-                     .. "&client_id=" .. KONG_CLIENT_ID
-                     .. "&client_secret=" .. KONG_CLIENT_SECRET,
-              ssl_verify = (keycloak_host ~= ""),
+              method   = "POST",
+              headers  = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+              body     = "token=" .. token
+                      .. "&client_id=" .. KONG_CLIENT_ID
+                      .. "&client_secret=" .. KONG_CLIENT_SECRET,
+              ssl_verify        = (keycloak_host ~= ""),
+              keepalive         = true,
+              keepalive_timeout = 60000,
+              keepalive_pool    = 4,
           })
 
           if not res then
