@@ -197,6 +197,7 @@ plugins:
           end
       body_filter:
         - |
+          local cjson = require("cjson")
           local masked_fields = kong.ctx.shared.masked_fields
           if not masked_fields or #masked_fields == 0 then return end
 
