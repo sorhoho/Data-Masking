@@ -28,6 +28,13 @@ allow {
 # ── Masking fields (empty array = no masking) ─────────────────────────────────
 default masked_fields = []
 
+# Unmask endpoint: caller explicitly requested full data; no masking regardless of role
+masked_fields = [] {
+    startswith(input.path, "/api/unmask")
+}
+
+# Regular endpoint: apply role-based masking
 masked_fields = fields {
+    not startswith(input.path, "/api/unmask")
     fields := role_masked_fields[input.role]
 }

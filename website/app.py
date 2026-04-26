@@ -2,7 +2,7 @@ import os
 import threading
 import requests
 from functools import wraps
-from flask import Flask, session, redirect, url_for, render_template
+from flask import Flask, session, redirect, url_for, render_template, request, jsonify
 from authlib.integrations.flask_client import OAuth
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -172,6 +172,49 @@ def customer_detail(customer_id):
     return render_template("customer.html",
                            customer=None, error=error,
                            user=current_user(), customer_id=customer_id)
+
+
+@app.post("/customer/<customer_id>/reveal")
+@login_required
+def reveal_customer(customer_id):
+    user         = current_user() or {}
+    username     = user.get("preferred_username", "unknown")
+    access_token = session["access_token"]
+    reason       = (request.form.get("reason") or "").strip()
+
+    if not reason:
+        return jsonify({"error": "Reason is required"}), 400
+
+    log_event("warn", "unmask_request",
+              user=username, customer_id=customer_id, unmask_reason=reason)
+
+    try:
+        resp = requests.get(
+            f"{KONG_URL}/api/unmask/{customer_id}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "X-Unmask-Reason": reason,
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            log_event("warn", "unmask_success",
+                      user=username, customer_id=customer_id, unmask_reason=reason)
+            return jsonify(resp.json())
+
+        err_body = resp.json() if resp.content else {}
+        err_msg  = err_body.get("message", f"HTTP {resp.status_code}")
+        log_event("warn", "unmask_denied",
+                  user=username, customer_id=customer_id,
+                  http_status=resp.status_code, error=err_msg)
+        return jsonify({"error": err_msg}), resp.status_code
+
+    except requests.exceptions.Timeout:
+        log_event("error", "unmask_timeout", user=username, customer_id=customer_id)
+        return jsonify({"error": "Request timed out"}), 504
+    except Exception as e:
+        log_event("error", "unmask_error", user=username, customer_id=customer_id)
+        return jsonify({"error": str(e)}), 503
 
 
 if __name__ == "__main__":

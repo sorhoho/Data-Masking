@@ -15,6 +15,12 @@ services:
         methods:
           - GET
         strip_path: false
+      - name: crm-unmask-route
+        paths:
+          - /api/unmask
+        methods:
+          - GET
+        strip_path: false
 
 # ── Plugins (applied to the crm-service) ─────────────────────────────────────
 plugins:
@@ -184,6 +190,23 @@ plugins:
               " fields_to_mask=", tostring(#(policy.masked_fields or {}))
           )
 
+          -- ── Unmask path: require X-Unmask-Reason header, then rewrite upstream path ──
+          local req_path = kong.request.get_path()
+          if req_path:match("^/api/unmask/") then
+              local reason = kong.request.get_header("X-Unmask-Reason")
+              if not reason or reason == "" then
+                  kong.ctx.shared.deny_reason = "missing_unmask_reason"
+                  return json_exit(400, "X-Unmask-Reason header is required for data unmasking")
+              end
+              kong.ctx.shared.unmask_reason = reason
+              local cid = req_path:match("^/api/unmask/(.+)$")
+              kong.service.request.set_path("/api/customer/" .. (cid or ""))
+              kong.log.warn(
+                  "Unmask requested: user=", intro.preferred_username,
+                  " customer=", cid, " reason=", reason
+              )
+          end
+
   # ── Step 2: Response masking ───────────────────────────────────────────────
   - name: post-function
     service: crm-service
@@ -274,9 +297,12 @@ plugins:
           local token_ok    = kong.ctx.shared.token_active
           local opa_allowed = kong.ctx.shared.opa_allowed
           local deny_reason = kong.ctx.shared.deny_reason
-          local path        = kong.request.get_path()
-          local method      = kong.request.get_method()
-          local customer_id = path:match("/api/customer/([^/?]+)") or ""
+          local path          = kong.request.get_path()
+          local method        = kong.request.get_method()
+          local customer_id   = path:match("/api/customer/([^/?]+)")
+                             or path:match("/api/unmask/([^/?]+)") or ""
+          local unmask_reason = kong.ctx.shared.unmask_reason
+          local event_type    = unmask_reason and "unmask_request" or "api_request"
 
           local opa_decision
           if opa_allowed ~= nil then
@@ -291,11 +317,12 @@ plugins:
           else                      level = "info" end
 
           local entry = cjson.encode({
-            service="kong", level=level, event="api_request",
+            service="kong", level=level, event=event_type,
             method=method, path=path, customer_id=customer_id,
             http_status=status, user=username, role=user_role,
             token_active=token_ok, opa_decision=opa_decision,
             masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
+            unmask_reason=unmask_reason,
           })
 
           local ok, httpc = pcall(http.new)

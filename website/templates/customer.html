@@ -28,6 +28,56 @@
         <small class="d-block mt-1 text-muted">Masking enforced by Kong → OPA. Raw values never leave the CRM.</small>
       </div>
     </div>
+
+    {# ── Reveal panel ─────────────────────────────────────────────── #}
+    <div class="card border-danger mb-4 shadow-sm" id="reveal-panel">
+      <div class="card-header bg-danger text-white fw-bold d-flex align-items-center gap-2">
+        <span>&#128275;</span> Reveal Unmasked Data
+        <small class="ms-auto fw-normal opacity-75">Every reveal is audit-logged</small>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-danger py-2 mb-3 small mb-0">
+          &#9888;&nbsp;Unmasked PII is recorded in the audit trail with your username and reason.
+          Use only for authorised business purposes.
+        </div>
+        <div class="d-flex gap-2 align-items-end flex-wrap mt-3">
+          <div class="flex-grow-1">
+            <label class="form-label fw-semibold small mb-1" for="unmask-reason">Reason for access</label>
+            <select id="unmask-reason" class="form-select form-select-sm">
+              <option value="">Select a reason…</option>
+              <option value="Customer callback">Customer callback</option>
+              <option value="Billing dispute">Billing dispute</option>
+              <option value="Identity verification">Identity verification</option>
+              <option value="Fraud investigation">Fraud investigation</option>
+            </select>
+          </div>
+          <button id="reveal-btn" class="btn btn-danger btn-sm px-3" onclick="revealData()">
+            &#128275; Reveal
+          </button>
+        </div>
+        <div id="reveal-error" class="text-danger small mt-2" style="display:none"></div>
+      </div>
+    </div>
+
+    {# ── Unmasked data panel (shown after successful reveal) ──────── #}
+    <div id="unmasked-panel" class="card border-success mb-4 shadow-sm" style="display:none">
+      <div class="card-header bg-success text-white fw-bold d-flex align-items-center gap-2">
+        <span>&#128275;</span> Unmasked Identity
+        <span class="badge bg-light text-success ms-2 fw-normal" id="unmask-reason-badge"></span>
+        <small class="ms-auto fw-normal opacity-75">Recorded in audit log</small>
+      </div>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-3">Name</dt>
+          <dd class="col-sm-9 font-monospace fw-semibold" id="u-name">—</dd>
+          <dt class="col-sm-3">MSISDN</dt>
+          <dd class="col-sm-9 font-monospace fw-semibold" id="u-msisdn">—</dd>
+          <dt class="col-sm-3">Email</dt>
+          <dd class="col-sm-9 font-monospace fw-semibold" id="u-email">—</dd>
+        </dl>
+      </div>
+    </div>
+
   {% else %}
     <div class="alert alert-success">
       &#9989; <strong>Full access</strong> – no masking applied for role <code>{{ meta.get('role', 'admin') }}</code>.
@@ -144,5 +194,52 @@
     </div>
   </div>
 
+{% endif %}
+
+{% if customer and customer.get('_masking', {}).get('applied') %}
+<script>
+function revealData() {
+  const reason = document.getElementById('unmask-reason').value;
+  const errEl  = document.getElementById('reveal-error');
+  errEl.style.display = 'none';
+
+  if (!reason) {
+    errEl.textContent = 'Please select a reason before revealing.';
+    errEl.style.display = '';
+    return;
+  }
+
+  const btn = document.getElementById('reveal-btn');
+  btn.disabled = true;
+  btn.textContent = 'Revealing…';
+
+  const form = new FormData();
+  form.append('reason', reason);
+
+  fetch('/customer/{{ customer_id }}/reveal', { method: 'POST', body: form })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        errEl.textContent = 'Error: ' + data.error;
+        errEl.style.display = '';
+        btn.disabled = false;
+        btn.innerHTML = '&#128275; Reveal';
+        return;
+      }
+      document.getElementById('u-name').textContent   = data.name   || '—';
+      document.getElementById('u-msisdn').textContent = data.msisdn || '—';
+      document.getElementById('u-email').textContent  = data.email  || '—';
+      document.getElementById('unmask-reason-badge').textContent = reason;
+      document.getElementById('unmasked-panel').style.display = '';
+      document.getElementById('reveal-panel').style.display   = 'none';
+    })
+    .catch(e => {
+      errEl.textContent = 'Network error: ' + e.message;
+      errEl.style.display = '';
+      btn.disabled = false;
+      btn.innerHTML = '&#128275; Reveal';
+    });
+}
+</script>
 {% endif %}
 {% endblock %}
