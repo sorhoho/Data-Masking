@@ -3,7 +3,11 @@
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
-  <h2>Customer Record &mdash; <code>{{ customer_id }}</code></h2>
+  <h2>Customer Record &mdash; <code>{{ customer_id }}</code>
+    {% if customer and customer.get('vip') %}
+      <span class="badge bg-danger ms-2" title="VIP Customer">&#128081; VIP</span>
+    {% endif %}
+  </h2>
   <a href="/search" class="btn btn-outline-secondary">&larr; Back to search</a>
 </div>
 
@@ -12,9 +16,55 @@
     <strong>Error:</strong> {{ error }}
   </div>
 
+{% elif needs_access_ref %}
+  {# ── VIP access reference prompt ──────────────────────────────────────── #}
+  <div class="alert alert-warning d-flex align-items-start gap-2">
+    <span class="fs-3">&#128081;</span>
+    <div>
+      <strong>VIP Customer — Access Reference Required</strong><br/>
+      <small class="text-muted">
+        This customer is flagged as VIP. Every access is audit-logged.
+        Provide a valid business reference (ticket, case, or authorisation number) to proceed.
+      </small>
+    </div>
+  </div>
+  <div class="card border-danger shadow-sm mb-4">
+    <div class="card-header bg-danger text-white fw-bold d-flex align-items-center gap-2">
+      <span>&#128275;</span> Authorised Access Required
+      <small class="ms-auto fw-normal opacity-75">All VIP accesses are permanently recorded</small>
+    </div>
+    <div class="card-body">
+      <form method="get" action="/customer/{{ customer_id }}">
+        <label class="form-label fw-semibold" for="ref-input">Access Reference Number</label>
+        <div class="input-group">
+          <input id="ref-input" name="ref" type="text" class="form-control"
+                 placeholder="e.g. TICKET-2024-VIP-001 or CRM-REF-567890"
+                 required autofocus />
+          <button class="btn btn-danger" type="submit">&#128275; Access Customer Record</button>
+        </div>
+        <small class="text-muted d-block mt-2">
+          &#9888; Your username, reference number, timestamp, and IP are recorded in the audit trail.
+        </small>
+      </form>
+    </div>
+  </div>
+
 {% elif customer %}
 
-  {# ── Masking notice ───────────────────────────────────────────────── #}
+  {# ── VIP banner ───────────────────────────────────────────────────────── #}
+  {% if customer.get('vip') %}
+  <div class="alert alert-danger d-flex align-items-center gap-2 mb-3">
+    <span class="fs-4">&#128081;</span>
+    <div>
+      <strong>VIP Customer</strong> &mdash; Enhanced access controls active.<br/>
+      <small class="text-muted">
+        Access reference <code>{{ access_ref }}</code> has been recorded in the audit log.
+      </small>
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Masking notice ───────────────────────────────────────────────────── #}
   {% set meta = customer.get('_masking', {}) %}
   {% if meta.get('applied') %}
     <div class="alert alert-warning d-flex align-items-start gap-2">
@@ -29,7 +79,7 @@
       </div>
     </div>
 
-    {# ── Reveal panel ─────────────────────────────────────────────── #}
+    {# ── Reveal panel ─────────────────────────────────────────────────── #}
     <div class="card border-danger mb-4 shadow-sm" id="reveal-panel">
       <div class="card-header bg-danger text-white fw-bold d-flex align-items-center gap-2">
         <span>&#128275;</span> Reveal Unmasked Data
@@ -56,6 +106,8 @@
           </button>
         </div>
         <div id="reveal-error" class="text-danger small mt-2" style="display:none"></div>
+        {# Pass access_ref to JavaScript for VIP unmask calls #}
+        <input type="hidden" id="access-ref-value" value="{{ access_ref or '' }}">
       </div>
     </div>
 
@@ -68,12 +120,16 @@
       </div>
       <div class="card-body">
         <dl class="row mb-0">
-          <dt class="col-sm-3">Name</dt>
+          <dt class="col-sm-3">Name <span class="badge bg-danger ms-1 small">L1</span></dt>
           <dd class="col-sm-9 font-monospace fw-semibold" id="u-name">—</dd>
-          <dt class="col-sm-3">MSISDN</dt>
+          <dt class="col-sm-3">MSISDN <span class="badge bg-danger ms-1 small">L1</span></dt>
           <dd class="col-sm-9 font-monospace fw-semibold" id="u-msisdn">—</dd>
-          <dt class="col-sm-3">Email</dt>
+          <dt class="col-sm-3">Email <span class="badge bg-danger ms-1 small">L1</span></dt>
           <dd class="col-sm-9 font-monospace fw-semibold" id="u-email">—</dd>
+          <dt class="col-sm-3">National ID <span class="badge bg-danger ms-1 small">L1</span></dt>
+          <dd class="col-sm-9 font-monospace fw-semibold" id="u-national-id">—</dd>
+          <dt class="col-sm-3">Address <span class="badge bg-danger ms-1 small">L1</span></dt>
+          <dd class="col-sm-9 font-monospace fw-semibold" id="u-address">—</dd>
         </dl>
       </div>
     </div>
@@ -84,18 +140,22 @@
     </div>
   {% endif %}
 
-  {# ── Customer card ────────────────────────────────────────────────── #}
+  {# ── Customer cards ───────────────────────────────────────────────────── #}
   <div class="row g-4">
+
+    {# Identity card (L1 fields) #}
     <div class="col-md-6">
       <div class="card shadow-sm h-100">
-        <div class="card-header bg-primary text-white fw-bold">
+        <div class="card-header bg-primary text-white fw-bold d-flex align-items-center gap-2">
           &#128100; Identity
+          <span class="badge bg-danger ms-auto">L1 Data</span>
         </div>
         <div class="card-body">
           <dl class="row mb-0">
-            <dt class="col-sm-4">Name</dt>
+
+            <dt class="col-sm-4">Name <span class="badge bg-danger ms-1 small">L1</span></dt>
             <dd class="col-sm-8">
-              {% if '***' in customer.name or '*' in customer.name %}
+              {% if '*' in (customer.name | string) %}
                 <span class="text-muted font-monospace">{{ customer.name }}</span>
                 <span class="badge bg-warning text-dark ms-1">masked</span>
               {% else %}
@@ -103,9 +163,9 @@
               {% endif %}
             </dd>
 
-            <dt class="col-sm-4">MSISDN</dt>
+            <dt class="col-sm-4">MSISDN <span class="badge bg-danger ms-1 small">L1</span></dt>
             <dd class="col-sm-8">
-              {% if '*' in customer.msisdn %}
+              {% if '*' in (customer.msisdn | string) %}
                 <span class="text-muted font-monospace">{{ customer.msisdn }}</span>
                 <span class="badge bg-warning text-dark ms-1">masked</span>
               {% else %}
@@ -113,20 +173,42 @@
               {% endif %}
             </dd>
 
-            <dt class="col-sm-4">Email</dt>
+            <dt class="col-sm-4">Email <span class="badge bg-danger ms-1 small">L1</span></dt>
             <dd class="col-sm-8">
-              {% if '*' in customer.email %}
+              {% if '*' in (customer.email | string) %}
                 <span class="text-muted font-monospace">{{ customer.email }}</span>
                 <span class="badge bg-warning text-dark ms-1">masked</span>
               {% else %}
                 {{ customer.email }}
               {% endif %}
             </dd>
+
+            <dt class="col-sm-4">National ID <span class="badge bg-danger ms-1 small">L1</span></dt>
+            <dd class="col-sm-8">
+              {% if '*' in (customer.national_id | string) %}
+                <span class="text-muted font-monospace">{{ customer.national_id }}</span>
+                <span class="badge bg-warning text-dark ms-1">masked</span>
+              {% else %}
+                <span class="font-monospace">{{ customer.national_id }}</span>
+              {% endif %}
+            </dd>
+
+            <dt class="col-sm-4">Address <span class="badge bg-danger ms-1 small">L1</span></dt>
+            <dd class="col-sm-8">
+              {% if customer.address == '*** (redacted)' or '*' in (customer.address | string) %}
+                <span class="text-muted font-monospace">{{ customer.address }}</span>
+                <span class="badge bg-warning text-dark ms-1">masked</span>
+              {% else %}
+                {{ customer.address }}
+              {% endif %}
+            </dd>
+
           </dl>
         </div>
       </div>
     </div>
 
+    {# Account card #}
     <div class="col-md-6">
       <div class="card shadow-sm h-100">
         <div class="card-header bg-secondary text-white fw-bold">
@@ -170,9 +252,69 @@
         </div>
       </div>
     </div>
+
+    {# L2 profiling / usage card #}
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-header bg-dark text-white fw-bold d-flex align-items-center gap-2">
+          &#128202; Usage &amp; Profiling
+          <span class="badge bg-warning text-dark ms-auto">L2 Data</span>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <div class="col-md-4">
+              <dl class="mb-0">
+                <dt class="small text-muted">Last Call Duration
+                  <span class="badge bg-warning text-dark ms-1">L2</span>
+                </dt>
+                <dd class="fw-semibold font-monospace">
+                  {% if '***' in (customer.last_call_duration | string) %}
+                    <span class="text-muted">***</span>
+                    <span class="badge bg-warning text-dark ms-1">masked</span>
+                  {% else %}
+                    {{ customer.last_call_duration }} s
+                  {% endif %}
+                </dd>
+              </dl>
+            </div>
+            <div class="col-md-4">
+              <dl class="mb-0">
+                <dt class="small text-muted">Data Roaming
+                  <span class="badge bg-warning text-dark ms-1">L2</span>
+                </dt>
+                <dd class="fw-semibold font-monospace">
+                  {% if '***' in (customer.data_roaming_gb | string) %}
+                    <span class="text-muted">***</span>
+                    <span class="badge bg-warning text-dark ms-1">masked</span>
+                  {% else %}
+                    {{ customer.data_roaming_gb }} GB
+                  {% endif %}
+                </dd>
+              </dl>
+            </div>
+            <div class="col-md-4">
+              <dl class="mb-0">
+                <dt class="small text-muted">Last Known Location
+                  <span class="badge bg-warning text-dark ms-1">L2</span>
+                </dt>
+                <dd class="fw-semibold font-monospace">
+                  {% if '***' in (customer.last_location | string) %}
+                    <span class="text-muted">***</span>
+                    <span class="badge bg-warning text-dark ms-1">masked</span>
+                  {% else %}
+                    {{ customer.last_location }}
+                  {% endif %}
+                </dd>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
-  {# ── Policy / flow diagram ─────────────────────────────────────────── #}
+  {# ── Policy / flow diagram ────────────────────────────────────────────── #}
   <div class="card mt-4 border-0 bg-light shadow-sm">
     <div class="card-body">
       <h6 class="fw-bold mb-3">&#128260; Request flow for this response</h6>
@@ -199,8 +341,9 @@
 {% if customer and customer.get('_masking', {}).get('applied') %}
 <script>
 function revealData() {
-  const reason = document.getElementById('unmask-reason').value;
-  const errEl  = document.getElementById('reveal-error');
+  const reason     = document.getElementById('unmask-reason').value;
+  const access_ref = document.getElementById('access-ref-value').value;
+  const errEl      = document.getElementById('reveal-error');
   errEl.style.display = 'none';
 
   if (!reason) {
@@ -215,6 +358,7 @@ function revealData() {
 
   const form = new FormData();
   form.append('reason', reason);
+  if (access_ref) form.append('access_ref', access_ref);
 
   fetch('/customer/{{ customer_id }}/reveal', { method: 'POST', body: form })
     .then(r => r.json())
@@ -226,9 +370,11 @@ function revealData() {
         btn.innerHTML = '&#128275; Reveal';
         return;
       }
-      document.getElementById('u-name').textContent   = data.name   || '—';
-      document.getElementById('u-msisdn').textContent = data.msisdn || '—';
-      document.getElementById('u-email').textContent  = data.email  || '—';
+      document.getElementById('u-name').textContent      = data.name        || '—';
+      document.getElementById('u-msisdn').textContent    = data.msisdn      || '—';
+      document.getElementById('u-email').textContent     = data.email       || '—';
+      document.getElementById('u-national-id').textContent = data.national_id || '—';
+      document.getElementById('u-address').textContent   = data.address     || '—';
       document.getElementById('unmask-reason-badge').textContent = reason;
       document.getElementById('unmasked-panel').style.display = '';
       document.getElementById('reveal-panel').style.display   = 'none';

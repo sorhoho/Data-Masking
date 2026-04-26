@@ -37,6 +37,8 @@ plugins:
       headers:
         - Authorization
         - Content-Type
+        - X-Unmask-Reason
+        - X-Access-Reference
       exposed_headers:
         - Content-Type
       credentials: true
@@ -64,7 +66,8 @@ plugins:
           local KONG_CLIENT_ID     = "kong-client"
           local KONG_CLIENT_SECRET = "kong-secret-456"
           local OPA_URL  = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
-          local ROLE_PRIORITY = { admin = 3, supervisor = 2, agent = 1 }
+          local LOG_URL  = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
+          local ROLE_PRIORITY = { admin = 4, supervisor = 3, vip_agent = 2, agent = 1 }
 
           kong.ctx.shared.token_active = false
           kong.ctx.shared.opa_allowed  = false
@@ -146,12 +149,19 @@ plugins:
               return json_exit(403, "Access denied: no valid role assigned")
           end
 
+          -- Extract customer_id from request path (used in OPA + VIP check)
+          local req_path    = kong.request.get_path()
+          local customer_id = req_path:match("^/api/customer/([^/?]+)")
+                           or req_path:match("^/api/unmask/([^/?]+)")
+                           or ""
+
           local opa_payload = cjson.encode({
               input = {
-                  role     = user_role,
-                  username = intro.preferred_username or "unknown",
-                  path     = kong.request.get_path(),
-                  method   = kong.request.get_method(),
+                  role        = user_role,
+                  username    = intro.preferred_username or "unknown",
+                  path        = req_path,
+                  method      = kong.request.get_method(),
+                  customer_id = customer_id,
               }
           })
 
@@ -177,8 +187,12 @@ plugins:
           local policy = opa_data.result or {}
 
           if not policy.allow then
-              kong.log.info("OPA denied: user=", intro.preferred_username, " role=", user_role)
+              kong.log.info("OPA denied: user=", intro.preferred_username, " role=", user_role,
+                            " customer=", customer_id)
               kong.ctx.shared.deny_reason = "opa_denied"
+              if policy.is_vip then
+                  return json_exit(403, "Access denied: VIP customer requires vip_agent or admin role")
+              end
               return json_exit(403, "Access denied by security policy")
           end
 
@@ -186,20 +200,62 @@ plugins:
           kong.ctx.shared.masked_fields = policy.masked_fields or {}
           kong.ctx.shared.user_role     = user_role
           kong.ctx.shared.username      = intro.preferred_username or "unknown"
+          kong.ctx.shared.is_vip        = policy.is_vip == true
 
           kong.log.info(
               "Access granted: user=", intro.preferred_username,
               " role=", user_role,
+              " customer=", customer_id,
+              " is_vip=", tostring(policy.is_vip == true),
               " fields_to_mask=", tostring(#(policy.masked_fields or {}))
           )
 
-          -- ── Unmask path: require X-Unmask-Reason header, then rewrite upstream path ──
-          local req_path = kong.request.get_path()
+          -- ── VIP customer: mandatory X-Access-Reference + real-time alert ──
+          if policy.is_vip then
+              local access_ref = kong.request.get_header("X-Access-Reference")
+              if not access_ref or access_ref == "" then
+                  kong.ctx.shared.deny_reason = "missing_access_reference"
+                  return json_exit(400,
+                      "X-Access-Reference header is required for VIP customer access")
+              end
+              kong.ctx.shared.access_reference = access_ref
+
+              -- Real-time VIP alert (fire-and-forget, 500 ms timeout)
+              local al_ok, al_httpc = pcall(http.new)
+              if al_ok then
+                  al_httpc:set_timeout(500)
+                  pcall(function()
+                      al_httpc:request_uri(LOG_URL, {
+                          method  = "POST",
+                          headers = { ["Content-Type"] = "application/json" },
+                          body    = cjson.encode({
+                              service          = "kong",
+                              level            = "warn",
+                              event            = "vip_access_alert",
+                              customer_id      = customer_id,
+                              user             = intro.preferred_username,
+                              role             = user_role,
+                              access_reference = access_ref,
+                              path             = req_path,
+                          }),
+                      })
+                  end)
+              end
+
+              kong.log.warn(
+                  "VIP access: user=", intro.preferred_username,
+                  " customer=", customer_id,
+                  " ref=", access_ref
+              )
+          end
+
+          -- ── Unmask path: require X-Unmask-Reason, then rewrite upstream path ──
           if req_path:match("^/api/unmask/") then
               local reason = kong.request.get_header("X-Unmask-Reason")
               if not reason or reason == "" then
                   kong.ctx.shared.deny_reason = "missing_unmask_reason"
-                  return json_exit(400, "X-Unmask-Reason header is required for data unmasking")
+                  return json_exit(400,
+                      "X-Unmask-Reason header is required for data unmasking")
               end
               kong.ctx.shared.unmask_reason = reason
               local cid = req_path:match("^/api/unmask/(.+)$")
@@ -256,7 +312,32 @@ plugins:
             return table.concat(parts, " ")
           end
 
-          local MASKERS = { email=mask_email, msisdn=mask_msisdn, name=mask_name }
+          local function mask_national_id(v)
+            if type(v) ~= "string" or #v == 0 then return "***" end
+            -- Show first 2 digits only (e.g. "850315-14-5678" → "85************")
+            if #v <= 2 then return string.rep("*", #v) end
+            return v:sub(1,2) .. string.rep("*", #v-2)
+          end
+
+          local function mask_address(v)
+            if type(v) ~= "string" or #v == 0 then return "***" end
+            return "*** (redacted)"
+          end
+
+          local function mask_redact(v)
+            return "***"
+          end
+
+          local MASKERS = {
+            email              = mask_email,
+            msisdn             = mask_msisdn,
+            name               = mask_name,
+            national_id        = mask_national_id,
+            address            = mask_address,
+            last_call_duration = mask_redact,
+            data_roaming_gb    = mask_redact,
+            last_location      = mask_redact,
+          }
 
           local chunk = ngx.arg[1]
           local eof   = ngx.arg[2]
@@ -278,34 +359,39 @@ plugins:
           end
 
           data["_masking"] = {
-            applied=true, role=kong.ctx.shared.user_role or "unknown",
-            masked_fields=masked_fields, gateway="kong-opa",
+            applied       = true,
+            role          = kong.ctx.shared.user_role or "unknown",
+            masked_fields = masked_fields,
+            gateway       = "kong-opa",
+            is_vip        = kong.ctx.shared.is_vip or false,
           }
 
           local out, enc_err = cjson.encode(data)
           if not out then kong.log.err("re-encode error: ", enc_err); ngx.arg[1]=body; return end
           ngx.arg[1] = out
 
-      # ── Step 3: Audit log (fires after response is sent – no latency impact) ──
+      # ── Step 3: Audit log (fires after response is sent) ──────────────────
       log:
         - |
           local http  = require("resty.http")
           local cjson = require("cjson.safe")
           local LOG_URL = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
 
-          local status      = kong.response.get_status()
-          local username    = kong.ctx.shared.username      or "anonymous"
-          local user_role   = kong.ctx.shared.user_role     or "unknown"
-          local masked      = kong.ctx.shared.masked_fields or {}
-          local token_ok    = kong.ctx.shared.token_active
-          local opa_allowed = kong.ctx.shared.opa_allowed
-          local deny_reason = kong.ctx.shared.deny_reason
-          local path          = kong.request.get_path()
-          local method        = kong.request.get_method()
-          local customer_id   = path:match("/api/customer/([^/?]+)")
-                             or path:match("/api/unmask/([^/?]+)") or ""
-          local unmask_reason = kong.ctx.shared.unmask_reason
-          local event_type    = unmask_reason and "unmask_request" or "api_request"
+          local status          = kong.response.get_status()
+          local username        = kong.ctx.shared.username      or "anonymous"
+          local user_role       = kong.ctx.shared.user_role     or "unknown"
+          local masked          = kong.ctx.shared.masked_fields or {}
+          local token_ok        = kong.ctx.shared.token_active
+          local opa_allowed     = kong.ctx.shared.opa_allowed
+          local deny_reason     = kong.ctx.shared.deny_reason
+          local path            = kong.request.get_path()
+          local method          = kong.request.get_method()
+          local customer_id     = path:match("/api/customer/([^/?]+)")
+                               or path:match("/api/unmask/([^/?]+)") or ""
+          local unmask_reason   = kong.ctx.shared.unmask_reason
+          local is_vip          = kong.ctx.shared.is_vip or false
+          local access_reference= kong.ctx.shared.access_reference
+          local event_type      = unmask_reason and "unmask_request" or "api_request"
 
           local opa_decision
           if opa_allowed ~= nil then
@@ -320,12 +406,23 @@ plugins:
           else                      level = "info" end
 
           local entry = cjson.encode({
-            service="kong", level=level, event=event_type,
-            method=method, path=path, customer_id=customer_id,
-            http_status=status, user=username, role=user_role,
-            token_active=token_ok, opa_decision=opa_decision,
-            masked_fields=masked, masked_count=#masked, deny_reason=deny_reason,
-            unmask_reason=unmask_reason,
+            service          = "kong",
+            level            = level,
+            event            = event_type,
+            method           = method,
+            path             = path,
+            customer_id      = customer_id,
+            http_status      = status,
+            user             = username,
+            role             = user_role,
+            token_active     = token_ok,
+            opa_decision     = opa_decision,
+            masked_fields    = masked,
+            masked_count     = #masked,
+            deny_reason      = deny_reason,
+            unmask_reason    = unmask_reason,
+            is_vip           = is_vip,
+            access_reference = access_reference,
           })
 
           local ok, httpc = pcall(http.new)

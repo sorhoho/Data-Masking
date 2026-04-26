@@ -68,15 +68,19 @@
     "realm": [
       {
         "name": "agent",
-        "description": "Customer service agent \u2013 sees masked PII"
+        "description": "Customer service agent – sees masked PII (L1+L2), no VIP access"
       },
       {
         "name": "supervisor",
-        "description": "Team supervisor \u2013 sees partial PII"
+        "description": "Team supervisor – sees partial L1 masking, no VIP access"
+      },
+      {
+        "name": "vip_agent",
+        "description": "VIP-authorised agent – full PII access, mandatory access reference"
       },
       {
         "name": "admin",
-        "description": "System admin \u2013 sees all data unmasked"
+        "description": "System admin – full access to all data including VIP"
       }
     ]
   },
@@ -115,6 +119,24 @@
       ],
       "realmRoles": [
         "supervisor"
+      ]
+    },
+    {
+      "username": "vip1",
+      "email": "vip1@demo.local",
+      "firstName": "Victor",
+      "lastName": "VIP-Agent",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "vip123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "vip_agent"
       ]
     },
     {

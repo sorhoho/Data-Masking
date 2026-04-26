@@ -13,8 +13,6 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # ── URL resolution ────────────────────────────────────────────────────────────
-# On Render KEYCLOAK_HOST is injected via fromService; locally fall back to the
-# two separate env vars so browser→Keycloak and server→Keycloak use the right URLs.
 _kc_host = os.environ.get("KEYCLOAK_HOST", "")
 if _kc_host:
     KEYCLOAK_URL          = f"https://{_kc_host}"
@@ -111,7 +109,6 @@ def logout():
     id_token  = session.get("id_token", "")
     log_event("info", "user_logout", user=user.get("preferred_username"))
     session.clear()
-    # Keycloak 23+ uses post_logout_redirect_uri + id_token_hint (old redirect_uri rejected)
     logout_url = (
         f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/logout"
         f"?post_logout_redirect_uri={url_for('index', _external=True)}"
@@ -134,13 +131,19 @@ def customer_detail(customer_id):
     user         = current_user() or {}
     username     = user.get("preferred_username", "unknown")
     access_token = session["access_token"]
+    access_ref   = request.args.get("ref", "").strip()
 
-    log_event("info", "crm_request", user=username, customer_id=customer_id)
+    log_event("info", "crm_request", user=username, customer_id=customer_id,
+              has_access_ref=bool(access_ref))
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if access_ref:
+        headers["X-Access-Reference"] = access_ref
 
     try:
         resp = requests.get(
             f"{KONG_URL}/api/customer/{customer_id}",
-            headers={"Authorization": f"Bearer {access_token}"},
+            headers=headers,
             timeout=30,
         )
         if resp.status_code == 200:
@@ -150,12 +153,27 @@ def customer_detail(customer_id):
                       user=username,
                       customer_id=customer_id,
                       http_status=200,
+                      is_vip=masking.get("is_vip", False),
                       masked_fields=masking.get("masked_fields", []))
             return render_template("customer.html",
                                    customer=data, error=None,
-                                   user=current_user(), customer_id=customer_id)
+                                   user=current_user(), customer_id=customer_id,
+                                   needs_access_ref=False, access_ref=access_ref)
 
-        if resp.status_code in (401, 403):
+        if resp.status_code == 400:
+            err_body = resp.json() if resp.content else {}
+            err_msg  = err_body.get("message", "")
+            if "access-reference" in err_msg.lower() or "access reference" in err_msg.lower() \
+                    or "x-access-reference" in err_msg.lower():
+                log_event("warn", "vip_access_ref_required",
+                          user=username, customer_id=customer_id)
+                return render_template("customer.html",
+                                       customer=None, error=None,
+                                       user=current_user(), customer_id=customer_id,
+                                       needs_access_ref=True, access_ref="")
+            error = err_msg or f"Bad request – HTTP 400"
+
+        elif resp.status_code in (401, 403):
             err_body = resp.json() if resp.content else {}
             error    = err_body.get("message", f"HTTP {resp.status_code}: Access denied")
             log_event("warn", "crm_denied",
@@ -175,7 +193,8 @@ def customer_detail(customer_id):
 
     return render_template("customer.html",
                            customer=None, error=error,
-                           user=current_user(), customer_id=customer_id)
+                           user=current_user(), customer_id=customer_id,
+                           needs_access_ref=False, access_ref="")
 
 
 @app.post("/customer/<customer_id>/reveal")
@@ -185,20 +204,26 @@ def reveal_customer(customer_id):
     username     = user.get("preferred_username", "unknown")
     access_token = session["access_token"]
     reason       = (request.form.get("reason") or "").strip()
+    access_ref   = (request.form.get("access_ref") or "").strip()
 
     if not reason:
         return jsonify({"error": "Reason is required"}), 400
 
     log_event("warn", "unmask_request",
-              user=username, customer_id=customer_id, unmask_reason=reason)
+              user=username, customer_id=customer_id, unmask_reason=reason,
+              has_access_ref=bool(access_ref))
+
+    headers = {
+        "Authorization":  f"Bearer {access_token}",
+        "X-Unmask-Reason": reason,
+    }
+    if access_ref:
+        headers["X-Access-Reference"] = access_ref
 
     try:
         resp = requests.get(
             f"{KONG_URL}/api/unmask/{customer_id}",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "X-Unmask-Reason": reason,
-            },
+            headers=headers,
             timeout=30,
         )
         if resp.status_code == 200:

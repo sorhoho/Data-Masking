@@ -52,8 +52,6 @@ services:
     build: ./crm-mock
     environment:
       LOG_DASHBOARD_URL: http://log-dashboard:9000/log
-    ports:
-      - "5001:5000"
     depends_on:
       log-dashboard:
         condition: service_healthy
