@@ -30,7 +30,7 @@
       <div class="card-body text-center py-4">
         <div class="fs-1 text-warning">&#128274;</div>
         <div class="display-6 fw-bold">
-          {{ config.role_masked_fields.values() | sum(attribute='__len__') }}
+          {{ config.role_masked_fields.values() | map('length') | sum }}
         </div>
         <div class="text-muted small">Active Mask Rules</div>
       </div>
