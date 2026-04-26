@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Masking Rules – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h4 class="fw-bold mb-0">&#128274; Role-Based Masking Rules</h4>
+</div>
+<p class="text-muted small mb-4">
+  A checked cell means that field is <strong>masked</strong> for that role.
+  Changes are saved to the database and pushed to OPA immediately — no restart required.
+</p>
+
+<form method="post" action="/roles/save">
+  <div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-bordered align-middle mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th class="ps-4" style="min-width:130px">Role</th>
+              {% for field, cls in fields %}
+              <th class="text-center" style="min-width:110px">
+                <div class="small">{{ field }}</div>
+                <span class="badge {{ 'bg-danger' if cls == 'L1' else 'bg-warning text-dark' }} small">{{ cls }}</span>
+              </th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for role in roles %}
+            <tr class="{{ 'table-light' if loop.index is odd else '' }}">
+              <td class="ps-4 fw-semibold">
+                <code>{{ role }}</code>
+                {% if role == 'admin' %}
+                  <span class="badge bg-dark ms-1 small">super</span>
+                {% elif role == 'vip_agent' %}
+                  <span class="badge bg-danger ms-1 small">VIP</span>
+                {% elif role == 'supervisor' %}
+                  <span class="badge bg-secondary ms-1 small">sup</span>
+                {% else %}
+                  <span class="badge bg-primary ms-1 small">std</span>
+                {% endif %}
+              </td>
+              {% for field, cls in fields %}
+              <td class="text-center">
+                <div class="form-check d-flex justify-content-center mb-0">
+                  <input class="form-check-input"
+                         type="checkbox"
+                         name="{{ role }}__{{ field }}"
+                         id="{{ role }}__{{ field }}"
+                         {% if masked[role][field] %}checked{% endif %}
+                         {% if role in ('admin',) %}
+                           {# admin can still be configured but warn visually #}
+                         {% endif %}
+                  />
+                </div>
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card-footer d-flex justify-content-between align-items-center">
+      <div class="small text-muted">
+        <span class="badge bg-danger me-1">L1</span> Direct identifiers &nbsp;|&nbsp;
+        <span class="badge bg-warning text-dark me-1">L2</span> Linkable / profiling data
+      </div>
+      <button class="btn btn-warning px-4 fw-semibold" type="submit">
+        &#128190; Save &amp; Sync to OPA
+      </button>
+    </div>
+  </div>
+</form>
+
+<div class="alert alert-secondary mt-4 small">
+  <strong>Role hierarchy:</strong>
+  <code>admin</code> (full access, all customers) &rsaquo;
+  <code>vip_agent</code> (full access, all customers incl. VIP, requires access reference) &rsaquo;
+  <code>supervisor</code> (partial masking, non-VIP only) &rsaquo;
+  <code>agent</code> (heavy masking, non-VIP only).
+  Masking logic runs in Kong after OPA policy evaluation.
+</div>
+{% endblock %}

@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128202; Dashboard</h4>
+  <form method="post" action="/sync">
+    <button class="btn btn-warning btn-sm px-3" type="submit">&#8635; Force Sync to OPA</button>
+  </form>
+</div>
+
+{# ── Summary cards ──────────────────────────────────────────────────────── #}
+<div class="row g-3 mb-4">
+
+  <div class="col-md-3">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-4">
+        <div class="fs-1 text-danger">&#128081;</div>
+        <div class="display-6 fw-bold">{{ config.vip_customers | length }}</div>
+        <div class="text-muted small">VIP Customers</div>
+      </div>
+      <div class="card-footer bg-transparent text-center">
+        <a href="/vip" class="btn btn-sm btn-outline-danger">Manage</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-4">
+        <div class="fs-1 text-warning">&#128274;</div>
+        <div class="display-6 fw-bold">
+          {{ config.role_masked_fields.values() | sum(attribute='__len__') }}
+        </div>
+        <div class="text-muted small">Active Mask Rules</div>
+      </div>
+      <div class="card-footer bg-transparent text-center">
+        <a href="/roles" class="btn btn-sm btn-outline-warning">Configure</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-4">
+        <div class="fs-1 text-primary">&#128100;</div>
+        <div class="display-6 fw-bold">{{ roles | length }}</div>
+        <div class="text-muted small">Configured Roles</div>
+      </div>
+      <div class="card-footer bg-transparent text-center">
+        <a href="/roles" class="btn btn-sm btn-outline-primary">View Matrix</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-4">
+        {% if recent_syncs and recent_syncs[0]['status'] == 'ok' %}
+          <div class="fs-1 text-success">&#10003;</div>
+          <div class="fw-bold text-success">OPA Synced</div>
+        {% else %}
+          <div class="fs-1 text-danger">&#9888;</div>
+          <div class="fw-bold text-danger">Sync Issue</div>
+        {% endif %}
+        <div class="text-muted small mt-1">
+          {% if recent_syncs %}
+            {{ recent_syncs[0]['synced_at'][:19] | replace('T',' ') }} UTC
+          {% else %}
+            No sync yet
+          {% endif %}
+        </div>
+      </div>
+      <div class="card-footer bg-transparent text-center">
+        <form method="post" action="/sync">
+          <button class="btn btn-sm btn-outline-secondary" type="submit">Re-sync</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{# ── Role × Field overview ──────────────────────────────────────────────── #}
+<div class="row g-3">
+  <div class="col-lg-8">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">&#128274; Active Masking Matrix</div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-bordered table-sm mb-0 text-center align-middle">
+            <thead class="table-dark">
+              <tr>
+                <th class="text-start ps-3">Role</th>
+                {% for field, cls in fields %}
+                  <th>
+                    <span class="d-block small">{{ field }}</span>
+                    <span class="badge badge-{{ cls | lower }} small">{{ cls }}</span>
+                  </th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for role in roles %}
+              <tr>
+                <td class="text-start ps-3 fw-semibold"><code>{{ role }}</code></td>
+                {% for field, _ in fields %}
+                  <td>
+                    {% if field in config.role_masked_fields.get(role, []) %}
+                      <span class="text-warning fw-bold" title="masked">&#128274;</span>
+                    {% else %}
+                      <span class="text-success" title="visible">&#10003;</span>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card-footer text-end">
+        <a href="/roles" class="btn btn-sm btn-outline-warning">Edit Rules</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    {# VIP list #}
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header fw-bold">&#128081; VIP Customers</div>
+      <div class="card-body">
+        {% if config.vip_customers %}
+          {% for cid in config.vip_customers %}
+            <span class="badge bg-danger me-1 mb-1 p-2 fs-6">{{ cid }}</span>
+          {% endfor %}
+        {% else %}
+          <span class="text-muted small">No VIP customers configured</span>
+        {% endif %}
+      </div>
+      <div class="card-footer text-end">
+        <a href="/vip" class="btn btn-sm btn-outline-danger">Manage VIP</a>
+      </div>
+    </div>
+
+    {# Sync log #}
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">&#128260; Recent OPA Syncs</div>
+      <div class="card-body p-0">
+        {% if recent_syncs %}
+        <ul class="list-group list-group-flush">
+          {% for s in recent_syncs %}
+          <li class="list-group-item d-flex justify-content-between align-items-center py-2 px-3">
+            <small class="text-muted">{{ s['synced_at'][:19] | replace('T',' ') }}</small>
+            <span class="badge {{ 'bg-success' if s['status'] == 'ok' else 'bg-danger' }}">
+              {{ s['status'] }}
+            </span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+          <p class="text-muted small p-3 mb-0">No syncs recorded yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{# ── Raw config JSON ────────────────────────────────────────────────────── #}
+<div class="card border-0 shadow-sm mt-3">
+  <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+    <span>&#128196; Live OPA Data Payload  <small class="text-muted fw-normal">– what is currently synced to <code>/v1/data/masking_config</code></small></span>
+    <a href="/api/config" target="_blank" class="btn btn-sm btn-outline-secondary">JSON</a>
+  </div>
+  <div class="card-body">
+    <pre class="bg-light rounded p-3 mb-0 small"><code>VIP customers : {{ config.vip_customers.keys() | list | join(', ') or '(none)' }}
+
+Masking rules :
+{% for role in roles %}  {{ "%-12s"|format(role) }} → {{ config.role_masked_fields.get(role, []) | join(', ') or '(no masking)' }}
+{% endfor %}</code></pre>
+  </div>
+</div>
+{% endblock %}

@@ -1,18 +1,17 @@
 package data_masking
 
-# ── VIP customer IDs ──────────────────────────────────────────────────────────
-vip_customers = {"C001", "C004"}
+# ── Config populated at runtime by admin-service ──────────────────────────────
+# Admin service PUTs to OPA's /v1/data/masking_config on startup and on every
+# change, so these rules always reflect the current admin configuration.
+# The else clauses are safe fallbacks in case data hasn't been pushed yet.
 
-# ── Role → masked fields ──────────────────────────────────────────────────────
-#   Classification:
-#     L1 (direct identifiers): name, msisdn, email, national_id, address
-#     L2 (linkable/profiling): last_call_duration, data_roaming_gb, last_location
-#
-#   agent:      all L1 + all L2 masked
-#   supervisor: sensitive L1 only (msisdn, national_id)
-#   vip_agent:  no masking (full PII access, VIP-authorised)
-#   admin:      no masking
-role_masked_fields = {
+vip_customers = c {
+    c := data.masking_config.vip_customers
+} else = {}
+
+role_masked_fields = f {
+    f := data.masking_config.role_masked_fields
+} else = {
     "agent":      ["name", "msisdn", "email", "national_id", "address",
                    "last_call_duration", "data_roaming_gb", "last_location"],
     "supervisor": ["msisdn", "national_id"],
@@ -20,7 +19,7 @@ role_masked_fields = {
     "admin":      []
 }
 
-# ── VIP flag (returned to Kong for header enforcement) ────────────────────────
+# ── VIP flag (returned to Kong for X-Access-Reference enforcement) ────────────
 default is_vip = false
 
 is_vip = true {
@@ -41,7 +40,7 @@ allow {
     not vip_customers[input.customer_id]
 }
 
-# Privileged roles: allowed for all customers (VIP enforcement done in Kong)
+# Privileged roles: allowed for all customers (VIP header enforcement done in Kong)
 allow {
     input.role == "vip_agent"
 }
@@ -58,7 +57,7 @@ masked_fields = [] {
     startswith(input.path, "/api/unmask")
 }
 
-# Regular endpoint: role-based masking
+# Regular endpoint: role-based masking from admin-configured rules
 masked_fields = fields {
     not startswith(input.path, "/api/unmask")
     fields := role_masked_fields[input.role]

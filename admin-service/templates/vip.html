@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}VIP Customers – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128081; VIP Customer Management</h4>
+</div>
+
+<div class="row g-4">
+
+  {# ── Add VIP customer ────────────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card border-danger shadow-sm">
+      <div class="card-header bg-danger text-white fw-bold">
+        &#43; Add VIP Customer
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          Designating a customer as VIP activates enhanced access controls:
+          only <code>vip_agent</code> and <code>admin</code> roles may access them,
+          and an <code>X-Access-Reference</code> header is mandatory on every request.
+        </p>
+        <form method="post" action="/vip/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="cid">Customer ID</label>
+            <input id="cid" name="customer_id" type="text" class="form-control"
+                   placeholder="e.g. C005" required autofocus />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="notes">Notes <span class="text-muted">(optional)</span></label>
+            <input id="notes" name="notes" type="text" class="form-control"
+                   placeholder="Reason or context" />
+          </div>
+          <button class="btn btn-danger w-100" type="submit">&#128081; Add as VIP &amp; Sync</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  {# ── Current VIP list ────────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span>Current VIP Customers
+          <span class="badge bg-danger ms-1">{{ customers | length }}</span>
+        </span>
+        <small class="text-muted fw-normal">Changes sync to OPA immediately</small>
+      </div>
+
+      {% if customers %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Customer ID</th>
+              <th>Added By</th>
+              <th>Added At</th>
+              <th>Notes</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in customers %}
+            <tr>
+              <td>
+                <span class="badge bg-danger p-2 fs-6">{{ c['customer_id'] }}</span>
+              </td>
+              <td><code>{{ c['added_by'] }}</code></td>
+              <td class="text-muted small">{{ c['added_at'][:19] | replace('T', ' ') }} UTC</td>
+              <td class="small text-muted">{{ c['notes'] or '—' }}</td>
+              <td class="text-end">
+                <form method="post" action="/vip/remove/{{ c['customer_id'] }}"
+                      onsubmit="return confirm('Remove {{ c['customer_id'] }} from VIP list?')">
+                  <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="card-body text-muted">No VIP customers configured.</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<div class="alert alert-secondary mt-4 small">
+  <strong>How VIP enforcement works:</strong>
+  Kong forwards the customer ID to OPA with every request. If OPA returns <code>is_vip: true</code>,
+  Kong enforces the <code>X-Access-Reference</code> header and fires a real-time alert to the audit log.
+  Removing a customer from this list takes effect on the next request (no service restart required).
+</div>
+{% endblock %}
