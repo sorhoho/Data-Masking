@@ -16,7 +16,9 @@ role_masked_fields = f {
                    "last_call_duration", "data_roaming_gb", "last_location"],
     "supervisor": ["msisdn", "national_id"],
     "vip_agent":  [],
-    "admin":      []
+    "admin":      [],
+    "partner":    ["name", "msisdn", "email", "national_id", "address",
+                   "last_call_duration", "data_roaming_gb", "last_location"]
 }
 
 # ── VIP flag (returned to Kong for X-Access-Reference enforcement) ────────────
@@ -47,6 +49,13 @@ allow {
 
 allow {
     input.role == "admin"
+}
+
+# Partner (machine-to-machine): full L1+L2 masking, no VIP access, no unmask
+allow {
+    input.role == "partner"
+    not vip_customers[input.customer_id]
+    not startswith(input.path, "/api/unmask")
 }
 
 # ── Masked fields (empty = no masking) ───────────────────────────────────────

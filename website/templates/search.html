@@ -4,36 +4,70 @@
 {% block content %}
 <h2 class="mb-4">Customer Search</h2>
 
-<div class="card shadow-sm mb-4">
-  <div class="card-body">
-    <form method="get" action="" onsubmit="go(event)">
-      <div class="input-group">
-        <input id="cid" type="text" class="form-control form-control-lg"
-               placeholder="Enter Customer ID (e.g. C001, C002, C003, C004)"
-               autofocus />
-        <button class="btn btn-primary btn-lg" type="submit">Look Up</button>
+<div class="row g-3 mb-4">
+
+  {# ── Customer ID search ─────────────────────────────────────────────────── #}
+  <div class="col-md-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-bold">&#128100; Search by Customer ID</div>
+      <div class="card-body">
+        <form onsubmit="goById(event)">
+          <div class="input-group">
+            <input id="cid" type="text" class="form-control"
+                   placeholder="e.g. C001, C002, C003, C004"
+                   autofocus />
+            <button class="btn btn-primary" type="submit">Look Up</button>
+          </div>
+          <small class="text-muted d-block mt-2">Enter the customer account ID directly.</small>
+        </form>
       </div>
-    </form>
+    </div>
   </div>
+
+  {# ── MSISDN search ──────────────────────────────────────────────────────── #}
+  <div class="col-md-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-bold">&#128222; Search by MSISDN</div>
+      <div class="card-body">
+        <form method="get" action="/customer/by-msisdn">
+          <div class="input-group">
+            <input name="msisdn" type="text" class="form-control"
+                   placeholder="e.g. +60123456789"
+                   pattern="\+?[0-9]{8,15}" />
+            <button class="btn btn-secondary" type="submit">Look Up</button>
+          </div>
+          <small class="text-muted d-block mt-2">
+            Enter the MSISDN as provided by the customer.
+            OPA enforces masking per role.
+          </small>
+        </form>
+      </div>
+    </div>
+  </div>
+
 </div>
 
-<h5 class="text-muted">Available test customers</h5>
+<h5 class="text-muted mb-3">Quick access — test customers</h5>
 <div class="row row-cols-1 row-cols-md-4 g-3">
 
   {% set vip_ids = ['C001', 'C004'] %}
+  {% set customer_names = {'C001': 'Ahmad bin Abdullah', 'C002': 'Siti Nurhaliza', 'C003': 'Rajesh Kumar', 'C004': 'Mei Ling Tan'} %}
+  {% set customer_msisdns = {'C001': '+60123456789', 'C002': '+60198765432', 'C003': '+60112233445', 'C004': '+60167890123'} %}
 
   {% for cid in ['C001', 'C002', 'C003', 'C004'] %}
   <div class="col">
     <a href="/customer/{{ cid }}" class="text-decoration-none">
       <div class="card h-100 shadow-sm border-0
                   {% if cid in vip_ids %}border border-danger{% endif %} bg-light">
-        <div class="card-body text-center py-4">
-          <div class="fs-1">
+        <div class="card-body text-center py-3">
+          <div class="fs-2">
             {% if cid in vip_ids %}&#128081;{% else %}&#128100;{% endif %}
           </div>
           <div class="fw-bold">{{ cid }}</div>
+          <div class="small text-muted">{{ customer_names[cid] }}</div>
+          <code class="small text-secondary">{{ customer_msisdns[cid] }}</code>
           {% if cid in vip_ids %}
-            <span class="badge bg-danger mt-1">VIP</span>
+            <div class="mt-1"><span class="badge bg-danger">VIP</span></div>
             <div class="small text-muted mt-1">Access reference required</div>
           {% endif %}
         </div>
@@ -56,7 +90,7 @@
 </div>
 
 <script>
-function go(e) {
+function goById(e) {
     e.preventDefault();
     const id = document.getElementById('cid').value.trim();
     if (id) window.location = '/customer/' + encodeURIComponent(id);

@@ -125,6 +125,97 @@ def search():
     return render_template("search.html", user=current_user())
 
 
+@app.get("/customer/by-msisdn")
+@login_required
+def customer_by_msisdn():
+    """Look up a customer by MSISDN via Kong (resolves MSISDN → masked profile)."""
+    user         = current_user() or {}
+    username     = user.get("preferred_username", "unknown")
+    access_token = session["access_token"]
+    msisdn       = request.args.get("msisdn", "").strip()
+    access_ref   = request.args.get("ref", "").strip()
+
+    if not msisdn:
+        return redirect(url_for("search"))
+
+    log_event("info", "msisdn_lookup",
+              user=username,
+              msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****")
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if access_ref:
+        headers["X-Access-Reference"] = access_ref
+
+    error = None
+    try:
+        resp = requests.get(
+            f"{KONG_URL}/api/customer",
+            params={"msisdn": msisdn},
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data        = resp.json()
+            customer_id = data.get("id", "unknown")
+            masking     = data.get("_masking", {})
+            log_event("info", "msisdn_lookup_success",
+                      user=username,
+                      customer_id=customer_id,
+                      is_vip=masking.get("is_vip", False),
+                      masked_fields=masking.get("masked_fields", []))
+            return render_template("customer.html",
+                                   customer=data, error=None,
+                                   user=current_user(),
+                                   customer_id=customer_id,
+                                   needs_access_ref=False,
+                                   access_ref=access_ref,
+                                   msisdn=msisdn)
+
+        if resp.status_code == 400:
+            err_body = resp.json() if resp.content else {}
+            err_msg  = err_body.get("message", "")
+            if "access-reference" in err_msg.lower() or "access reference" in err_msg.lower() \
+                    or "x-access-reference" in err_msg.lower():
+                log_event("warn", "vip_access_ref_required",
+                          user=username,
+                          msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****")
+                return render_template("customer.html",
+                                       customer=None, error=None,
+                                       user=current_user(),
+                                       customer_id=None,
+                                       needs_access_ref=True,
+                                       access_ref="",
+                                       msisdn=msisdn)
+            error = err_msg or "Bad request – HTTP 400"
+
+        elif resp.status_code in (401, 403):
+            err_body = resp.json() if resp.content else {}
+            error    = err_body.get("message", f"HTTP {resp.status_code}: Access denied")
+            log_event("warn", "crm_denied",
+                      user=username,
+                      msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****",
+                      http_status=resp.status_code, error=error)
+        elif resp.status_code == 404:
+            error = f"No customer found with MSISDN {msisdn}"
+        else:
+            error = f"Upstream error – HTTP {resp.status_code}"
+
+    except requests.exceptions.ConnectionError:
+        error = "Cannot reach Kong API Gateway. Is it running?"
+        log_event("error", "kong_unreachable", user=username)
+    except requests.exceptions.Timeout:
+        error = "Request timed out."
+        log_event("error", "kong_timeout", user=username)
+
+    return render_template("customer.html",
+                           customer=None, error=error,
+                           user=current_user(),
+                           customer_id=None,
+                           needs_access_ref=False,
+                           access_ref="",
+                           msisdn=msisdn)
+
+
 @app.get("/customer/<customer_id>")
 @login_required
 def customer_detail(customer_id):
@@ -158,7 +249,8 @@ def customer_detail(customer_id):
             return render_template("customer.html",
                                    customer=data, error=None,
                                    user=current_user(), customer_id=customer_id,
-                                   needs_access_ref=False, access_ref=access_ref)
+                                   needs_access_ref=False, access_ref=access_ref,
+                                   msisdn=None)
 
         if resp.status_code == 400:
             err_body = resp.json() if resp.content else {}
@@ -170,7 +262,8 @@ def customer_detail(customer_id):
                 return render_template("customer.html",
                                        customer=None, error=None,
                                        user=current_user(), customer_id=customer_id,
-                                       needs_access_ref=True, access_ref="")
+                                       needs_access_ref=True, access_ref="",
+                                       msisdn=None)
             error = err_msg or f"Bad request – HTTP 400"
 
         elif resp.status_code in (401, 403):
@@ -194,7 +287,8 @@ def customer_detail(customer_id):
     return render_template("customer.html",
                            customer=None, error=error,
                            user=current_user(), customer_id=customer_id,
-                           needs_access_ref=False, access_ref="")
+                           needs_access_ref=False, access_ref="",
+                           msisdn=None)
 
 
 @app.post("/customer/<customer_id>/reveal")
@@ -243,6 +337,54 @@ def reveal_customer(customer_id):
         return jsonify({"error": "Request timed out"}), 504
     except Exception as e:
         log_event("error", "unmask_error", user=username, customer_id=customer_id)
+        return jsonify({"error": str(e)}), 503
+
+
+@app.post("/subscription")
+@login_required
+def add_subscription():
+    """Submit an add-subscription transaction through Kong."""
+    user         = current_user() or {}
+    username     = user.get("preferred_username", "unknown")
+    access_token = session["access_token"]
+    msisdn       = (request.form.get("msisdn") or "").strip()
+    plan         = (request.form.get("plan") or "").strip()
+    access_ref   = (request.form.get("access_ref") or "").strip()
+
+    if not msisdn or not plan:
+        return jsonify({"error": "MSISDN and plan are required"}), 400
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+    }
+    if access_ref:
+        headers["X-Access-Reference"] = access_ref
+
+    log_event("info", "subscription_request",
+              user=username,
+              msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****",
+              plan=plan)
+
+    try:
+        resp = requests.post(
+            f"{KONG_URL}/api/subscription",
+            json={"msisdn": msisdn, "plan": plan},
+            headers=headers,
+            timeout=30,
+        )
+        data = resp.json() if resp.content else {}
+        if resp.status_code == 200:
+            log_event("info", "subscription_success",
+                      user=username,
+                      customer_id=data.get("customer_id"),
+                      plan=plan)
+        return jsonify(data), resp.status_code
+
+    except requests.exceptions.Timeout:
+        log_event("error", "subscription_timeout", user=username)
+        return jsonify({"error": "Request timed out"}), 504
+    except Exception as e:
+        log_event("error", "subscription_error", user=username)
         return jsonify({"error": str(e)}), 503
 
 

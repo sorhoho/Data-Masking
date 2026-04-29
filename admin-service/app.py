@@ -26,7 +26,7 @@ FIELDS = [
     ("data_roaming_gb",    "L2"),
     ("last_location",      "L2"),
 ]
-ROLES = ["agent", "supervisor", "vip_agent", "admin"]
+ROLES = ["agent", "supervisor", "vip_agent", "admin", "partner"]
 
 _DEFAULT_MASKS = [
     ("agent", "name"), ("agent", "msisdn"), ("agent", "email"),
@@ -34,6 +34,11 @@ _DEFAULT_MASKS = [
     ("agent", "last_call_duration"), ("agent", "data_roaming_gb"),
     ("agent", "last_location"),
     ("supervisor", "msisdn"), ("supervisor", "national_id"),
+    # partner: full L1+L2 masking (machine-to-machine external access)
+    ("partner", "name"), ("partner", "msisdn"), ("partner", "email"),
+    ("partner", "national_id"), ("partner", "address"),
+    ("partner", "last_call_duration"), ("partner", "data_roaming_gb"),
+    ("partner", "last_location"),
 ]
 _DEFAULT_VIPS = [
     ("C001", "Initial VIP – seeded on first run"),

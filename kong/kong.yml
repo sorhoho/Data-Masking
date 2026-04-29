@@ -21,6 +21,12 @@ services:
         methods:
           - GET
         strip_path: false
+      - name: crm-subscription-route
+        paths:
+          - /api/subscription
+        methods:
+          - POST
+        strip_path: false
 
 # ── Plugins (applied to the crm-service) ─────────────────────────────────────
 plugins:
@@ -32,6 +38,7 @@ plugins:
         - "*"
       methods:
         - GET
+        - POST
         - OPTIONS
       headers:
         - Authorization
@@ -54,9 +61,10 @@ plugins:
           local http  = require("resty.http")
           local cjson = require("cjson.safe")
 
-          local OPA_URL = os.getenv("OPA_URL") or "http://opa:8181/v1/data/data_masking"
-          local LOG_URL = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
-          local ROLE_PRIORITY = { admin = 4, supervisor = 3, vip_agent = 2, agent = 1 }
+          local OPA_URL          = os.getenv("OPA_URL")          or "http://opa:8181/v1/data/data_masking"
+          local LOG_URL          = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
+          local CRM_INTERNAL_URL = os.getenv("CRM_INTERNAL_URL") or "http://crm-mock:5000"
+          local ROLE_PRIORITY    = { admin = 4, supervisor = 3, vip_agent = 2, agent = 1, partner = 1 }
 
           kong.ctx.shared.opa_allowed = false
           kong.ctx.shared.deny_reason = nil
@@ -126,12 +134,68 @@ plugins:
               return json_exit(403, "Access denied: no valid role assigned")
           end
 
-          -- ── 4. OPA policy check ───────────────────────────────────────────
+          -- ── 4. Resolve customer_id ────────────────────────────────────────
+          -- Different routes supply customer_id different ways:
+          --   GET /api/customer/<id>    → ID from path
+          --   GET /api/unmask/<id>      → ID from path
+          --   GET /api/customer?msisdn= → MSISDN resolved to ID via CRM
+          --   POST /api/subscription    → MSISDN resolved from request body
           local req_path    = kong.request.get_path()
           local customer_id = req_path:match("^/api/customer/([^/?]+)")
                            or req_path:match("^/api/unmask/([^/?]+)")
                            or ""
+          local req_msisdn  = nil
 
+          local function resolve_msisdn(msisdn)
+              local h = http.new(); h:set_timeout(3000)
+              local r, _ = h:request_uri(
+                  CRM_INTERNAL_URL .. "/api/resolve?msisdn=" .. ngx.escape_uri(msisdn),
+                  { method = "GET" }
+              )
+              if r and r.status == 200 then
+                  local d = cjson.decode(r.body)
+                  if d and d.customer_id then return d.customer_id end
+              end
+              return nil
+          end
+
+          -- MSISDN-based customer search: GET /api/customer?msisdn=...
+          if customer_id == "" and req_path == "/api/customer" then
+              local msisdn = kong.request.get_query_arg("msisdn")
+              if msisdn and msisdn ~= "" then
+                  req_msisdn  = msisdn
+                  local cid   = resolve_msisdn(msisdn)
+                  if not cid then
+                      kong.ctx.shared.deny_reason = "customer_not_found"
+                      return json_exit(404, "Customer not found for the given MSISDN")
+                  end
+                  customer_id = cid
+              end
+          end
+
+          -- Subscription POST: resolve MSISDN from request body
+          if req_path:match("^/api/subscription") then
+              ngx.req.read_body()
+              local raw = ngx.req.get_body_data()
+              if raw and raw ~= "" then
+                  local body_data, _ = cjson.decode(raw)
+                  if body_data and body_data.msisdn then
+                      req_msisdn  = body_data.msisdn
+                      local cid   = resolve_msisdn(body_data.msisdn)
+                      if not cid then
+                          kong.ctx.shared.deny_reason = "customer_not_found"
+                          return json_exit(404, "Customer not found for the given MSISDN")
+                      end
+                      customer_id = cid
+                  end
+              end
+              if customer_id == "" then
+                  kong.ctx.shared.deny_reason = "missing_msisdn"
+                  return json_exit(400, "msisdn is required in the request body")
+              end
+          end
+
+          -- ── 5. OPA policy check ───────────────────────────────────────────
           local httpc = http.new()
           httpc:set_timeout(5000)
 
@@ -179,6 +243,8 @@ plugins:
           kong.ctx.shared.user_role     = user_role
           kong.ctx.shared.username      = claims.preferred_username or "unknown"
           kong.ctx.shared.is_vip        = policy.is_vip == true
+          kong.ctx.shared.customer_id   = customer_id
+          kong.ctx.shared.req_msisdn    = req_msisdn
 
           kong.log.info(
               "Access granted: user=", claims.preferred_username,
@@ -187,7 +253,7 @@ plugins:
               " fields_to_mask=", tostring(#(policy.masked_fields or {}))
           )
 
-          -- ── 5. VIP: mandatory X-Access-Reference + real-time alert ────────
+          -- ── 6. VIP: mandatory X-Access-Reference + real-time alert ────────
           if policy.is_vip then
               local access_ref = kong.request.get_header("X-Access-Reference")
               if not access_ref or access_ref == "" then
@@ -222,7 +288,7 @@ plugins:
                             " customer=", customer_id, " ref=", access_ref)
           end
 
-          -- ── 6. Unmask path: X-Unmask-Reason required, rewrite upstream ────
+          -- ── 7. Unmask path: X-Unmask-Reason required, rewrite upstream ────
           if req_path:match("^/api/unmask/") then
               local reason = kong.request.get_header("X-Unmask-Reason")
               if not reason or reason == "" then
@@ -352,12 +418,21 @@ plugins:
           local deny_reason      = kong.ctx.shared.deny_reason
           local path             = kong.request.get_path()
           local method           = kong.request.get_method()
-          local customer_id      = path:match("/api/customer/([^/?]+)")
+          local customer_id      = kong.ctx.shared.customer_id
+                                or path:match("/api/customer/([^/?]+)")
                                 or path:match("/api/unmask/([^/?]+)") or ""
           local unmask_reason    = kong.ctx.shared.unmask_reason
           local is_vip           = kong.ctx.shared.is_vip or false
           local access_reference = kong.ctx.shared.access_reference
-          local event_type       = unmask_reason and "unmask_request" or "api_request"
+          local req_msisdn       = kong.ctx.shared.req_msisdn
+          local event_type
+          if path:match("^/api/subscription") then
+            event_type = "subscription_request"
+          elseif unmask_reason then
+            event_type = "unmask_request"
+          else
+            event_type = "api_request"
+          end
 
           local opa_decision
           if opa_allowed ~= nil then
@@ -395,6 +470,7 @@ plugins:
                   unmask_reason    = unmask_reason,
                   is_vip           = is_vip,
                   access_reference = access_reference,
+                  req_msisdn_hint  = req_msisdn and (req_msisdn:sub(1,4) .. "****") or nil,
                 }),
               })
             end)

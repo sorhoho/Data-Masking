@@ -1,6 +1,8 @@
 import os
+import uuid
 import threading
 import requests as req_lib
+from datetime import datetime
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -110,9 +112,29 @@ def log_event(level, event, **kw):
     threading.Thread(target=_fire, args=(entry,), daemon=True).start()
 
 
+# Index for O(1) MSISDN lookup
+MSISDN_INDEX = {c["msisdn"]: cid for cid, c in CUSTOMERS.items()}
+
+# Available subscription plans
+PLANS = ["Prepaid 20GB", "Postpaid 50GB", "Postpaid 100GB", "Postpaid 200GB"]
+
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.get("/api/resolve")
+def resolve_customer():
+    """Internal endpoint for Kong to map MSISDN → customer_id before calling OPA."""
+    msisdn = request.args.get("msisdn", "").strip()
+    if not msisdn:
+        return jsonify({"error": "msisdn parameter required"}), 400
+    cid = MSISDN_INDEX.get(msisdn)
+    if not cid:
+        return jsonify({"error": "Customer not found", "msisdn": msisdn}), 404
+    customer = CUSTOMERS[cid]
+    return jsonify({"customer_id": cid, "vip": customer["vip"]})
 
 
 @app.get("/api/customer/<customer_id>")
@@ -126,6 +148,56 @@ def get_customer(customer_id):
               customer_id=customer_id, found=True,
               plan=customer["plan"], status=customer["status"], http_status=200)
     return jsonify(customer)
+
+
+@app.get("/api/customer")
+def search_customer():
+    """MSISDN-based customer lookup (same data as by-ID)."""
+    msisdn = request.args.get("msisdn", "").strip()
+    if not msisdn:
+        return jsonify({"error": "msisdn query parameter required"}), 400
+    cid = MSISDN_INDEX.get(msisdn)
+    if not cid:
+        log_event("warn", "customer_fetched",
+                  msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****",
+                  found=False, http_status=404)
+        return jsonify({"error": "Customer not found", "msisdn": msisdn}), 404
+    customer = CUSTOMERS[cid]
+    log_event("info", "customer_fetched",
+              customer_id=cid, found=True, lookup="msisdn",
+              plan=customer["plan"], status=customer["status"], http_status=200)
+    return jsonify(customer)
+
+
+@app.post("/api/subscription")
+def add_subscription():
+    """Add a subscription plan to a customer identified by MSISDN."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+    msisdn = (data.get("msisdn") or "").strip()
+    plan   = (data.get("plan") or "").strip()
+    if not msisdn or not plan:
+        return jsonify({"error": "msisdn and plan are required"}), 400
+    if plan not in PLANS:
+        return jsonify({"error": f"Unknown plan. Valid plans: {PLANS}"}), 400
+    cid = MSISDN_INDEX.get(msisdn)
+    if not cid:
+        return jsonify({"error": "Customer not found", "msisdn": msisdn}), 404
+    customer = CUSTOMERS[cid]
+    subscription_id = f"SUB-{uuid.uuid4().hex[:8].upper()}"
+    log_event("info", "subscription_added",
+              customer_id=cid, plan=plan,
+              previous_plan=customer["plan"], http_status=200)
+    return jsonify({
+        "status":           "success",
+        "subscription_id":  subscription_id,
+        "customer_id":      cid,
+        "msisdn":           msisdn,
+        "plan":             plan,
+        "previous_plan":    customer["plan"],
+        "effective_date":   datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
 
 
 @app.get("/api/customers")

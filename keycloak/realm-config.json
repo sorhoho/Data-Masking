@@ -62,6 +62,24 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true
+    },
+    {
+      "clientId": "partner-client",
+      "name": "External Partner API",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "partner-secret-789",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ]
     }
   ],
   "roles": {
@@ -81,6 +99,10 @@
       {
         "name": "admin",
         "description": "System admin – full access to all data including VIP"
+      },
+      {
+        "name": "partner",
+        "description": "External partner (M2M) – full L1+L2 masking, no VIP access, no unmask"
       }
     ]
   },
@@ -155,6 +177,16 @@
       ],
       "realmRoles": [
         "admin"
+      ]
+    },
+    {
+      "username": "service-account-partner-client",
+      "email": "service-account-partner-client@placeholder.org",
+      "enabled": true,
+      "emailVerified": true,
+      "serviceAccountClientId": "partner-client",
+      "realmRoles": [
+        "partner"
       ]
     }
   ]
