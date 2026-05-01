@@ -21,6 +21,16 @@ role_masked_fields = f {
                    "last_call_duration", "data_roaming_gb", "last_location"]
 }
 
+# ── Backend field registry ───────────────────────────────────────────────────
+# Returns the field map for input.backend so Kong can mask alias field names.
+# Shape: { backend_field: { canonical, classification }, ... }
+# Kong uses this to mask "mobilenum" with the same function as "msisdn", etc.
+default backend_fields = {}
+
+backend_fields = f {
+    f := data.masking_config.backends[input.backend]
+}
+
 # ── VIP flag (returned to Kong for X-Access-Reference enforcement) ────────────
 default is_vip = false
 

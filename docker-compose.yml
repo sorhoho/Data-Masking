@@ -84,6 +84,21 @@ services:
       retries: 15
       start_period: 20s
 
+  # ── Mock Billing Backend ──────────────────────────────────────────────────
+  billing-mock:
+    build: ./billing-mock
+    environment:
+      LOG_DASHBOARD_URL: http://log-dashboard:9000/log
+    depends_on:
+      log-dashboard:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   # ── API Gateway (Kong) ────────────────────────────────────────────────────
   kong:
     image: kong:3.5
@@ -107,6 +122,8 @@ services:
       - "8001:8001"
     depends_on:
       crm-mock:
+        condition: service_healthy
+      billing-mock:
         condition: service_healthy
       opa:
         condition: service_started

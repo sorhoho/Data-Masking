@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Billing Subscriber – CRM Portal{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/search">Search</a></li>
+    <li class="breadcrumb-item active">Billing Subscriber</li>
+  </ol>
+</nav>
+
+{# ── Access-reference gate ──────────────────────────────────────────────── #}
+{% if needs_access_ref %}
+<div class="alert alert-warning">
+  <strong>&#128081; VIP Subscriber</strong> — an <code>X-Access-Reference</code> ticket is required
+  to access this subscriber's record.
+</div>
+<div class="card shadow-sm">
+  <div class="card-header fw-bold">&#128273; Provide Access Reference</div>
+  <div class="card-body">
+    <form method="get" action="/subscriber/by-msisdn" class="row g-3">
+      <input type="hidden" name="msisdn" value="{{ msisdn }}">
+      <div class="col-md-8">
+        <label class="form-label">Access Reference / Ticket ID</label>
+        <input name="ref" type="text" class="form-control"
+               placeholder="e.g. TICKET-12345" required autofocus>
+        <small class="text-muted">Supervisor-approved ticket authorising access to this VIP record.</small>
+      </div>
+      <div class="col-md-4 d-flex align-items-end">
+        <button class="btn btn-warning w-100" type="submit">Submit Reference</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% elif error %}
+<div class="alert alert-danger">&#10060; {{ error }}</div>
+<a href="/search" class="btn btn-outline-secondary btn-sm">&#8592; Back to Search</a>
+
+{% elif subscriber %}
+
+{% set masking  = subscriber.get('_masking', {}) %}
+{% set masked   = masking.get('masked_fields', []) %}
+{% set is_vip   = masking.get('is_vip', false) %}
+{% set backend  = masking.get('backend', 'billing') %}
+{% set alias_map = {
+    'mobilenum':        {'canon': 'msisdn',             'cls': 'L1'},
+    'subname':          {'canon': 'name',                'cls': 'L1'},
+    'ic_num':           {'canon': 'national_id',         'cls': 'L1'},
+    'billing_address':  {'canon': 'address',             'cls': 'L1'},
+    'call_duration_s':  {'canon': 'last_call_duration',  'cls': 'L2'},
+    'roaming_gb':       {'canon': 'data_roaming_gb',     'cls': 'L2'}
+} %}
+
+<div class="d-flex align-items-center gap-3 mb-4">
+  <div class="fs-1">&#128179;</div>
+  <div>
+    <h4 class="mb-0 fw-bold">
+      {% if 'subname' in masked %}
+        <span class="text-muted fst-italic">&#x25A0;&#x25A0;&#x25A0;&#x25A0;&#x25A0;</span>
+      {% else %}
+        {{ subscriber.get('subname', '—') }}
+      {% endif %}
+      {% if is_vip %}<span class="badge bg-danger ms-2">VIP</span>{% endif %}
+    </h4>
+    <small class="text-muted">
+      Billing backend &mdash; MSISDN:
+      {% if 'mobilenum' in masked %}
+        <code class="text-warning">&#x25A0;&#x25A0;&#x25A0;&#x25A0;</code>
+      {% else %}
+        <code>{{ subscriber.get('mobilenum', '—') }}</code>
+      {% endif %}
+    </small>
+  </div>
+  <div class="ms-auto d-flex gap-2">
+    <span class="badge bg-secondary">backend: {{ backend }}</span>
+    {% if masked %}
+      <span class="badge bg-warning text-dark">{{ masked | length }} field(s) masked</span>
+    {% else %}
+      <span class="badge bg-success">Full access</span>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Masking notice ─────────────────────────────────────────────────────── #}
+{% if masked %}
+<div class="alert alert-warning py-2 small mb-3">
+  <strong>&#128274; Active masking:</strong>
+  Fields masked by Kong using backend alias mapping:
+  {% for f in masked %}<code class="me-1">{{ f }}</code>{% endfor %}
+  &nbsp;&#x2192;&nbsp; backend aliases also masked via field registry.
+</div>
+{% endif %}
+
+{# ── Field table ────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-bold d-flex justify-content-between">
+    <span>&#128196; Subscriber Record <small class="text-muted fw-normal">(billing backend fields)</small></span>
+    <small class="text-muted">{{ masking.get('role', '—') }}</small>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm table-bordered mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:180px">Backend Field</th>
+          <th style="width:160px">Canonical Name</th>
+          <th style="width:60px">Class</th>
+          <th>Value</th>
+          <th style="width:80px">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for bfield, meta in alias_map.items() %}
+        {% set val = subscriber.get(bfield) %}
+        {% set is_masked = meta['canon'] in masked %}
+        <tr {% if is_masked %}class="table-warning"{% endif %}>
+          <td><code>{{ bfield }}</code></td>
+          <td><span class="text-muted small">&#x2192;</span> <code>{{ meta['canon'] }}</code></td>
+          <td>
+            {% if meta['cls'] == 'L1' %}
+              <span class="badge badge-l1">L1</span>
+            {% else %}
+              <span class="badge badge-l2">L2</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if val is not none %}
+              {% if is_masked %}
+                <span class="text-warning font-monospace">{{ val }}</span>
+              {% else %}
+                <span class="font-monospace">{{ val }}</span>
+              {% endif %}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td class="text-center">
+            {% if is_masked %}
+              <span class="text-warning" title="masked">&#128274;</span>
+            {% else %}
+              <span class="text-success" title="visible">&#10003;</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+
+        {# Non-PII fields #}
+        {% for key in subscriber.keys() %}
+        {% if key not in alias_map and not key.startswith('_') %}
+        <tr>
+          <td><code>{{ key }}</code></td>
+          <td><span class="text-muted small">—</span></td>
+          <td><span class="badge bg-light text-secondary">—</span></td>
+          <td><span class="font-monospace">{{ subscriber[key] }}</span></td>
+          <td class="text-center"><span class="text-success">&#10003;</span></td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Masking metadata ───────────────────────────────────────────────────── #}
+{% if masking %}
+<details class="small text-muted mb-3">
+  <summary class="fw-semibold">&#128270; OPA masking metadata</summary>
+  <pre class="bg-light rounded p-2 mt-2"><code>{{ masking | tojson(indent=2) }}</code></pre>
+</details>
+{% endif %}
+
+<a href="/search" class="btn btn-outline-secondary btn-sm mt-1">&#8592; Back to Search</a>
+
+{% else %}
+<div class="alert alert-info">Enter an MSISDN to look up a billing subscriber.</div>
+<a href="/search" class="btn btn-outline-secondary btn-sm">&#8592; Back to Search</a>
+{% endif %}
+{% endblock %}

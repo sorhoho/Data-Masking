@@ -7,7 +7,7 @@
 <div class="row g-3 mb-4">
 
   {# ── Customer ID search ─────────────────────────────────────────────────── #}
-  <div class="col-md-6">
+  <div class="col-md-4">
     <div class="card shadow-sm h-100">
       <div class="card-header fw-bold">&#128100; Search by Customer ID</div>
       <div class="card-body">
@@ -21,13 +21,14 @@
           <small class="text-muted d-block mt-2">Enter the customer account ID directly.</small>
         </form>
       </div>
+      <div class="card-footer text-muted small">Backend: <code>CRM</code></div>
     </div>
   </div>
 
-  {# ── MSISDN search ──────────────────────────────────────────────────────── #}
-  <div class="col-md-6">
+  {# ── MSISDN search (CRM) ────────────────────────────────────────────────── #}
+  <div class="col-md-4">
     <div class="card shadow-sm h-100">
-      <div class="card-header fw-bold">&#128222; Search by MSISDN</div>
+      <div class="card-header fw-bold">&#128222; CRM Search by MSISDN</div>
       <div class="card-body">
         <form method="get" action="/customer/by-msisdn">
           <div class="input-group">
@@ -37,11 +38,34 @@
             <button class="btn btn-secondary" type="submit">Look Up</button>
           </div>
           <small class="text-muted d-block mt-2">
-            Enter the MSISDN as provided by the customer.
-            OPA enforces masking per role.
+            Canonical CRM fields. OPA enforces masking per role.
           </small>
         </form>
       </div>
+      <div class="card-footer text-muted small">Backend: <code>CRM</code> &mdash; canonical field names</div>
+    </div>
+  </div>
+
+  {# ── MSISDN search (Billing) ────────────────────────────────────────────── #}
+  <div class="col-md-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-bold">&#128179; Billing Search by MSISDN</div>
+      <div class="card-body">
+        <form method="get" action="/subscriber/by-msisdn">
+          <div class="input-group">
+            <input name="msisdn" type="text" class="form-control"
+                   placeholder="e.g. +60123456789"
+                   pattern="\+?[0-9]{8,15}" />
+            <button class="btn btn-success" type="submit">Look Up</button>
+          </div>
+          <small class="text-muted d-block mt-2">
+            Billing system uses aliased field names
+            (<code>mobilenum</code>, <code>subname</code>, …).
+            Kong maps aliases and applies the same masking rules.
+          </small>
+        </form>
+      </div>
+      <div class="card-footer text-muted small">Backend: <code>Billing</code> &mdash; aliased field names</div>
     </div>
   </div>
 

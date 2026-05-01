@@ -45,6 +45,32 @@ _DEFAULT_VIPS = [
     ("C004", "Initial VIP – seeded on first run"),
 ]
 
+# Backend registry — seeded on first run
+_DEFAULT_BACKENDS = [
+    ("crm",     "CRM System",      "http://crm-mock:5000",     "Main CRM — field names are canonical"),
+    ("billing", "Billing System",  "http://billing-mock:5001", "Billing backend — aliased field names"),
+]
+
+# Per-backend field mappings: (backend_id, backend_field, canonical_field, classification)
+_DEFAULT_FIELD_MAPPINGS = [
+    # CRM fields match canonical names
+    ("crm", "name",               "name",               "L1"),
+    ("crm", "msisdn",             "msisdn",             "L1"),
+    ("crm", "email",              "email",              "L1"),
+    ("crm", "national_id",        "national_id",        "L1"),
+    ("crm", "address",            "address",            "L1"),
+    ("crm", "last_call_duration", "last_call_duration", "L2"),
+    ("crm", "data_roaming_gb",    "data_roaming_gb",    "L2"),
+    ("crm", "last_location",      "last_location",      "L2"),
+    # Billing fields with different names
+    ("billing", "mobilenum",        "msisdn",             "L1"),
+    ("billing", "subname",          "name",               "L1"),
+    ("billing", "ic_num",           "national_id",        "L1"),
+    ("billing", "billing_address",  "address",            "L1"),
+    ("billing", "call_duration_s",  "last_call_duration", "L2"),
+    ("billing", "roaming_gb",       "data_roaming_gb",    "L2"),
+]
+
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -75,6 +101,21 @@ def init_db():
             status    TEXT NOT NULL,
             message   TEXT
         );
+        CREATE TABLE IF NOT EXISTS backends (
+            backend_id   TEXT PRIMARY KEY,
+            backend_name TEXT NOT NULL,
+            base_url     TEXT DEFAULT '',
+            description  TEXT DEFAULT '',
+            created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS field_mappings (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            backend_id     TEXT NOT NULL REFERENCES backends(backend_id) ON DELETE CASCADE,
+            backend_field  TEXT NOT NULL,
+            canonical_field TEXT NOT NULL,
+            classification TEXT NOT NULL DEFAULT 'L1',
+            UNIQUE(backend_id, backend_field)
+        );
     """)
     now = datetime.utcnow().isoformat()
     if not conn.execute("SELECT 1 FROM vip_customers LIMIT 1").fetchone():
@@ -88,6 +129,18 @@ def init_db():
             "INSERT INTO role_field_masks (role, field) VALUES (?, ?)",
             _DEFAULT_MASKS,
         )
+    if not conn.execute("SELECT 1 FROM backends LIMIT 1").fetchone():
+        conn.executemany(
+            "INSERT INTO backends (backend_id, backend_name, base_url, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(bid, name, url, desc, now) for bid, name, url, desc in _DEFAULT_BACKENDS],
+        )
+    if not conn.execute("SELECT 1 FROM field_mappings LIMIT 1").fetchone():
+        conn.executemany(
+            "INSERT INTO field_mappings (backend_id, backend_field, canonical_field, classification) "
+            "VALUES (?, ?, ?, ?)",
+            _DEFAULT_FIELD_MAPPINGS,
+        )
     conn.commit()
     conn.close()
 
@@ -96,16 +149,36 @@ def init_db():
 
 def get_config():
     conn = get_db()
-    vip_rows  = conn.execute("SELECT customer_id FROM vip_customers").fetchall()
-    mask_rows = conn.execute("SELECT role, field FROM role_field_masks").fetchall()
+    vip_rows     = conn.execute("SELECT customer_id FROM vip_customers").fetchall()
+    mask_rows    = conn.execute("SELECT role, field FROM role_field_masks").fetchall()
+    mapping_rows = conn.execute(
+        "SELECT backend_id, backend_field, canonical_field, classification "
+        "FROM field_mappings ORDER BY backend_id, backend_field"
+    ).fetchall()
     conn.close()
 
     vip_customers = {row["customer_id"]: True for row in vip_rows}
+
     role_masked_fields = {role: [] for role in ROLES}
     for row in mask_rows:
         if row["role"] in role_masked_fields:
             role_masked_fields[row["role"]].append(row["field"])
-    return {"vip_customers": vip_customers, "role_masked_fields": role_masked_fields}
+
+    backends = {}
+    for row in mapping_rows:
+        bid = row["backend_id"]
+        if bid not in backends:
+            backends[bid] = {}
+        backends[bid][row["backend_field"]] = {
+            "canonical":       row["canonical_field"],
+            "classification":  row["classification"],
+        }
+
+    return {
+        "vip_customers":      vip_customers,
+        "role_masked_fields": role_masked_fields,
+        "backends":           backends,
+    }
 
 
 def sync_to_opa(retries=3):
@@ -173,15 +246,19 @@ def logout():
 def dashboard():
     config = get_config()
     conn   = get_db()
-    recent_syncs = conn.execute(
+    recent_syncs  = conn.execute(
         "SELECT * FROM sync_log ORDER BY id DESC LIMIT 5"
     ).fetchall()
+    backend_count = conn.execute("SELECT COUNT(*) FROM backends").fetchone()[0]
+    mapping_count = conn.execute("SELECT COUNT(*) FROM field_mappings").fetchone()[0]
     conn.close()
     total_mask_count = sum(len(v) for v in config["role_masked_fields"].values())
     return render_template("dashboard.html",
                            config=config, recent_syncs=recent_syncs,
                            fields=FIELDS, roles=ROLES,
-                           total_mask_count=total_mask_count)
+                           total_mask_count=total_mask_count,
+                           backend_count=backend_count,
+                           mapping_count=mapping_count)
 
 
 @app.get("/health")
@@ -283,6 +360,111 @@ def roles_save():
         "success" if ok else "warning",
     )
     return redirect(url_for("roles_view"))
+
+
+# ── Backend registry (field alias mapping) ───────────────────────────────────
+
+@app.get("/backends")
+@login_required
+def backends_list():
+    conn = get_db()
+    backends = conn.execute(
+        "SELECT * FROM backends ORDER BY backend_id"
+    ).fetchall()
+    mappings = conn.execute(
+        "SELECT * FROM field_mappings ORDER BY backend_id, backend_field"
+    ).fetchall()
+    conn.close()
+    # Group mappings by backend_id
+    mapped = {}
+    for m in mappings:
+        mapped.setdefault(m["backend_id"], []).append(m)
+    return render_template("backends.html",
+                           backends=backends, mapped=mapped,
+                           fields=FIELDS,
+                           canonical_fields=[f for f, _ in FIELDS])
+
+
+@app.post("/backends/add")
+@login_required
+def backend_add():
+    bid   = (request.form.get("backend_id")   or "").strip().lower()
+    name  = (request.form.get("backend_name") or "").strip()
+    url   = (request.form.get("base_url")     or "").strip()
+    desc  = (request.form.get("description")  or "").strip()
+    if not bid or not name:
+        flash("Backend ID and name are required", "danger")
+        return redirect(url_for("backends_list"))
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO backends (backend_id, backend_name, base_url, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (bid, name, url, desc, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        ok, msg = sync_to_opa()
+        flash(f"Backend '{bid}' added " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
+              "success" if ok else "warning")
+    except sqlite3.IntegrityError:
+        flash(f"Backend ID '{bid}' already exists", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("backends_list"))
+
+
+@app.post("/backends/<backend_id>/delete")
+@login_required
+def backend_delete(backend_id):
+    conn = get_db()
+    conn.execute("DELETE FROM backends WHERE backend_id = ?", (backend_id,))
+    conn.commit()
+    conn.close()
+    ok, msg = sync_to_opa()
+    flash(f"Backend '{backend_id}' deleted " + ("– synced to OPA ✓" if ok else f"– sync failed: {msg}"),
+          "success" if ok else "warning")
+    return redirect(url_for("backends_list"))
+
+
+@app.post("/backends/<backend_id>/fields/add")
+@login_required
+def field_mapping_add(backend_id):
+    bfield = (request.form.get("backend_field")   or "").strip()
+    canon  = (request.form.get("canonical_field") or "").strip()
+    cls    = (request.form.get("classification")  or "L1").strip()
+    if not bfield or not canon:
+        flash("Backend field and canonical field are required", "danger")
+        return redirect(url_for("backends_list"))
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO field_mappings (backend_id, backend_field, canonical_field, classification) "
+            "VALUES (?, ?, ?, ?)",
+            (backend_id, bfield, canon, cls),
+        )
+        conn.commit()
+        ok, msg = sync_to_opa()
+        flash(f"Mapping {bfield}→{canon} added " + ("– synced ✓" if ok else f"– sync failed: {msg}"),
+              "success" if ok else "warning")
+    except sqlite3.IntegrityError:
+        flash(f"Field '{bfield}' already mapped for backend '{backend_id}'", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("backends_list"))
+
+
+@app.post("/backends/<backend_id>/fields/<int:field_id>/delete")
+@login_required
+def field_mapping_delete(backend_id, field_id):
+    conn = get_db()
+    conn.execute("DELETE FROM field_mappings WHERE id = ? AND backend_id = ?",
+                 (field_id, backend_id))
+    conn.commit()
+    conn.close()
+    ok, msg = sync_to_opa()
+    flash("Mapping removed " + ("– synced ✓" if ok else f"– sync failed: {msg}"),
+          "success" if ok else "warning")
+    return redirect(url_for("backends_list"))
 
 
 # ── Manual OPA sync ───────────────────────────────────────────────────────────

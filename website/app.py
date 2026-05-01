@@ -340,6 +340,91 @@ def reveal_customer(customer_id):
         return jsonify({"error": str(e)}), 503
 
 
+@app.get("/subscriber/by-msisdn")
+@login_required
+def subscriber_by_msisdn():
+    """Look up a billing subscriber by MSISDN via Kong."""
+    user         = current_user() or {}
+    username     = user.get("preferred_username", "unknown")
+    access_token = session["access_token"]
+    msisdn       = request.args.get("msisdn", "").strip()
+    access_ref   = request.args.get("ref", "").strip()
+
+    if not msisdn:
+        return redirect(url_for("search"))
+
+    log_event("info", "billing_lookup",
+              user=username,
+              msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****")
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if access_ref:
+        headers["X-Access-Reference"] = access_ref
+
+    error = None
+    try:
+        resp = requests.get(
+            f"{KONG_URL}/api/billing/subscriber",
+            params={"msisdn": msisdn},
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data    = resp.json()
+            masking = data.get("_masking", {})
+            log_event("info", "billing_lookup_success",
+                      user=username,
+                      msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****",
+                      masked_fields=masking.get("masked_fields", []))
+            return render_template("subscriber.html",
+                                   subscriber=data, error=None,
+                                   user=current_user(),
+                                   msisdn=msisdn,
+                                   access_ref=access_ref,
+                                   needs_access_ref=False)
+
+        if resp.status_code == 400:
+            err_body = resp.json() if resp.content else {}
+            err_msg  = err_body.get("message", "")
+            if "access-reference" in err_msg.lower() or "x-access-reference" in err_msg.lower():
+                log_event("warn", "vip_access_ref_required",
+                          user=username,
+                          msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****")
+                return render_template("subscriber.html",
+                                       subscriber=None, error=None,
+                                       user=current_user(),
+                                       msisdn=msisdn,
+                                       access_ref="",
+                                       needs_access_ref=True)
+            error = err_msg or "Bad request – HTTP 400"
+
+        elif resp.status_code in (401, 403):
+            err_body = resp.json() if resp.content else {}
+            error    = err_body.get("message", f"HTTP {resp.status_code}: Access denied")
+            log_event("warn", "billing_denied",
+                      user=username,
+                      msisdn_hint=msisdn[-4:] if len(msisdn) >= 4 else "****",
+                      http_status=resp.status_code, error=error)
+        elif resp.status_code == 404:
+            error = f"No billing subscriber found for MSISDN {msisdn}"
+        else:
+            error = f"Upstream error – HTTP {resp.status_code}"
+
+    except requests.exceptions.ConnectionError:
+        error = "Cannot reach Kong API Gateway. Is it running?"
+        log_event("error", "kong_unreachable", user=username)
+    except requests.exceptions.Timeout:
+        error = "Request timed out."
+        log_event("error", "kong_timeout", user=username)
+
+    return render_template("subscriber.html",
+                           subscriber=None, error=error,
+                           user=current_user(),
+                           msisdn=msisdn,
+                           access_ref="",
+                           needs_access_ref=False)
+
+
 @app.post("/subscription")
 @login_required
 def add_subscription():

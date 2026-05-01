@@ -1,13 +1,14 @@
 _format_version: "3.0"
 _transform: true
 
-# ── Upstream CRM service ──────────────────────────────────────────────────────
+# ── Upstream services ─────────────────────────────────────────────────────────
 services:
   - name: crm-service
     url: http://crm-mock:5000
     connect_timeout: 10000
     read_timeout: 10000
     write_timeout: 10000
+    tags: ["backend:crm"]
     routes:
       - name: crm-customer-route
         paths:
@@ -28,11 +29,24 @@ services:
           - POST
         strip_path: false
 
-# ── Plugins (applied to the crm-service) ─────────────────────────────────────
+  - name: billing-service
+    url: http://billing-mock:5001
+    connect_timeout: 10000
+    read_timeout: 10000
+    write_timeout: 10000
+    tags: ["backend:billing"]
+    routes:
+      - name: billing-subscriber-route
+        paths:
+          - /api/billing
+        methods:
+          - GET
+        strip_path: false
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
 plugins:
 
   - name: cors
-    service: crm-service
     config:
       origins:
         - "*"
@@ -50,11 +64,8 @@ plugins:
       credentials: true
       max_age: 3600
 
-  # ── Step 1: JWT decode + OPA policy check ────────────────────────────────
-  # Token signature is verified upstream (Kong JWT plugin in prod).
-  # Here we only decode the payload to extract claims — no Keycloak call.
+  # ── Step 1: JWT decode + OPA policy check + backend detection ────────────
   - name: pre-function
-    service: crm-service
     config:
       access:
         - |
@@ -134,18 +145,22 @@ plugins:
               return json_exit(403, "Access denied: no valid role assigned")
           end
 
-          -- ── 4. Resolve customer_id ────────────────────────────────────────
-          -- Different routes supply customer_id different ways:
-          --   GET /api/customer/<id>    → ID from path
-          --   GET /api/unmask/<id>      → ID from path
-          --   GET /api/customer?msisdn= → MSISDN resolved to ID via CRM
-          --   POST /api/subscription    → MSISDN resolved from request body
+          -- ── 4. Identify backend + resolve customer_id ─────────────────────
+          -- Backend is derived from path prefix; customer_id sourced differently
+          -- per route type. OPA receives backend so it can return the right
+          -- field alias registry for post-function masking.
           local req_path    = kong.request.get_path()
           local customer_id = req_path:match("^/api/customer/([^/?]+)")
                            or req_path:match("^/api/unmask/([^/?]+)")
                            or ""
           local req_msisdn  = nil
 
+          -- Derive backend tag from path prefix
+          local backend = "crm"
+          if req_path:match("^/api/billing") then backend = "billing" end
+          kong.ctx.shared.backend = backend
+
+          -- Helper: resolve MSISDN → CRM customer_id (for OPA VIP check)
           local function resolve_msisdn(msisdn)
               local h = http.new(); h:set_timeout(3000)
               local r, _ = h:request_uri(
@@ -159,7 +174,7 @@ plugins:
               return nil
           end
 
-          -- MSISDN-based customer search: GET /api/customer?msisdn=...
+          -- MSISDN-based CRM search: GET /api/customer?msisdn=...
           if customer_id == "" and req_path == "/api/customer" then
               local msisdn = kong.request.get_query_arg("msisdn")
               if msisdn and msisdn ~= "" then
@@ -170,6 +185,18 @@ plugins:
                       return json_exit(404, "Customer not found for the given MSISDN")
                   end
                   customer_id = cid
+              end
+          end
+
+          -- Billing subscriber: MSISDN in query param
+          if customer_id == "" and req_path:match("^/api/billing/subscriber") then
+              local msisdn = kong.request.get_query_arg("msisdn")
+              if msisdn and msisdn ~= "" then
+                  req_msisdn = msisdn
+                  -- Resolve to CRM customer_id for VIP check (best-effort)
+                  local cid = resolve_msisdn(msisdn)
+                  if cid then customer_id = cid end
+                  -- No CRM record → customer_id stays "", OPA treats as non-VIP
               end
           end
 
@@ -209,6 +236,7 @@ plugins:
                       path        = req_path,
                       method      = kong.request.get_method(),
                       customer_id = customer_id,
+                      backend     = backend,
                   }
               }),
           })
@@ -238,17 +266,19 @@ plugins:
               return json_exit(403, "Access denied by security policy")
           end
 
-          kong.ctx.shared.opa_allowed   = true
-          kong.ctx.shared.masked_fields = policy.masked_fields or {}
-          kong.ctx.shared.user_role     = user_role
-          kong.ctx.shared.username      = claims.preferred_username or "unknown"
-          kong.ctx.shared.is_vip        = policy.is_vip == true
-          kong.ctx.shared.customer_id   = customer_id
-          kong.ctx.shared.req_msisdn    = req_msisdn
+          kong.ctx.shared.opa_allowed    = true
+          kong.ctx.shared.masked_fields  = policy.masked_fields  or {}
+          kong.ctx.shared.backend_fields = policy.backend_fields or {}
+          kong.ctx.shared.user_role      = user_role
+          kong.ctx.shared.username       = claims.preferred_username or "unknown"
+          kong.ctx.shared.is_vip         = policy.is_vip == true
+          kong.ctx.shared.customer_id    = customer_id
+          kong.ctx.shared.req_msisdn     = req_msisdn
 
           kong.log.info(
               "Access granted: user=", claims.preferred_username,
-              " role=", user_role, " customer=", customer_id,
+              " role=", user_role, " backend=", backend,
+              " customer=", customer_id,
               " is_vip=", tostring(policy.is_vip == true),
               " fields_to_mask=", tostring(#(policy.masked_fields or {}))
           )
@@ -279,6 +309,7 @@ plugins:
                               role             = user_role,
                               access_reference = access_ref,
                               path             = req_path,
+                              backend          = backend,
                           }),
                       })
                   end)
@@ -305,7 +336,6 @@ plugins:
 
   # ── Step 2: Response masking ───────────────────────────────────────────────
   - name: post-function
-    service: crm-service
     config:
       header_filter:
         - |
@@ -361,6 +391,7 @@ plugins:
 
           local function mask_redact(v) return "***" end
 
+          -- Maskers keyed by CANONICAL field name
           local MASKERS = {
             email              = mask_email,
             msisdn             = mask_msisdn,
@@ -382,12 +413,28 @@ plugins:
           local data, err = cjson.decode(body)
           if not data or err then ngx.arg[1] = body; return end
 
+          -- Build set of canonical field names that need masking
           local to_mask = {}
           for _, f in ipairs(masked_fields) do to_mask[f] = true end
 
+          -- Pass 1: mask canonical fields (CRM and any backend using canonical names)
           for field, fn in pairs(MASKERS) do
             if to_mask[field] and data[field] ~= nil then
               data[field] = fn(tostring(data[field]))
+            end
+          end
+
+          -- Pass 2: mask backend-specific aliases
+          -- backend_fields = { backend_field: {canonical, classification}, ... }
+          -- Only process aliases (backend_field != canonical) to avoid double-masking
+          local backend_fields = kong.ctx.shared.backend_fields or {}
+          for bfield, bmap in pairs(backend_fields) do
+            local canon = type(bmap) == "table" and bmap["canonical"] or nil
+            if canon and canon ~= bfield and to_mask[canon] and data[bfield] ~= nil then
+              local fn = MASKERS[canon]
+              if fn then
+                data[bfield] = fn(tostring(data[bfield]))
+              end
             end
           end
 
@@ -397,6 +444,7 @@ plugins:
             masked_fields = masked_fields,
             gateway       = "kong-opa",
             is_vip        = kong.ctx.shared.is_vip or false,
+            backend       = kong.ctx.shared.backend or "unknown",
           }
 
           local out, enc_err = cjson.encode(data)
@@ -425,6 +473,7 @@ plugins:
           local is_vip           = kong.ctx.shared.is_vip or false
           local access_reference = kong.ctx.shared.access_reference
           local req_msisdn       = kong.ctx.shared.req_msisdn
+          local backend          = kong.ctx.shared.backend or "unknown"
           local event_type
           if path:match("^/api/subscription") then
             event_type = "subscription_request"
@@ -459,6 +508,7 @@ plugins:
                   event            = event_type,
                   method           = method,
                   path             = path,
+                  backend          = backend,
                   customer_id      = customer_id,
                   http_status      = status,
                   user             = username,

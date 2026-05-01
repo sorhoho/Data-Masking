@@ -12,7 +12,7 @@
 {# ── Summary cards ──────────────────────────────────────────────────────── #}
 <div class="row g-3 mb-4">
 
-  <div class="col-md-3">
+  <div class="col">
     <div class="card border-0 shadow-sm h-100">
       <div class="card-body text-center py-4">
         <div class="fs-1 text-danger">&#128081;</div>
@@ -25,7 +25,7 @@
     </div>
   </div>
 
-  <div class="col-md-3">
+  <div class="col">
     <div class="card border-0 shadow-sm h-100">
       <div class="card-body text-center py-4">
         <div class="fs-1 text-warning">&#128274;</div>
@@ -40,7 +40,7 @@
     </div>
   </div>
 
-  <div class="col-md-3">
+  <div class="col">
     <div class="card border-0 shadow-sm h-100">
       <div class="card-body text-center py-4">
         <div class="fs-1 text-primary">&#128100;</div>
@@ -53,7 +53,22 @@
     </div>
   </div>
 
-  <div class="col-md-3">
+  <div class="col">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body text-center py-4">
+        <div class="fs-1 text-info">&#128268;</div>
+        <div class="display-6 fw-bold">{{ backend_count }}</div>
+        <div class="text-muted small">Backends
+          <span class="badge bg-light text-secondary">{{ mapping_count }} maps</span>
+        </div>
+      </div>
+      <div class="card-footer bg-transparent text-center">
+        <a href="/backends" class="btn btn-sm btn-outline-info">Manage</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
     <div class="card border-0 shadow-sm h-100">
       <div class="card-body text-center py-4">
         {% if recent_syncs and recent_syncs[0]['status'] == 'ok' %}
