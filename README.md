@@ -42,13 +42,14 @@ gateway**, with a live admin console for policy management and multi-backend fie
 │  Browser / API Client                                                   │
 │    │  1. OIDC login (auth-code flow) or client_credentials (partner)   │
 │    ▼                                                                    │
-│  Keycloak :8080  ──  issues signed JWTs with realm_access.roles        │
+│  Keycloak :8080  ──  issues RS256-signed JWTs  ──  backed by Postgres  │
 │                                                                         │
 │  Website :3000  (OIDC code flow, Flask)                                 │
 │    │  2. Bearer <JWT> on every backend request                          │
 │    ▼                                                                    │
 │  Kong Gateway :8000  (DB-less, Lua serverless plugins)                 │
-│    │  3. Decode JWT locally  — extract role, no KC call per request     │
+│    │  3. Verify JWT RS256 signature — fetch JWKS from Keycloak,        │
+│    │       cache per-worker (5-min TTL), match kid, verify signature   │
 │    │  4. Resolve MSISDN → customer_id  (CRM internal, if needed)       │
 │    │  5. Call OPA with role + customer_id + path + backend             │
 │    │       ◄── allow/deny  +  masked_fields  +  is_vip                 │
@@ -62,12 +63,15 @@ gateway**, with a live admin console for policy management and multi-backend fie
 │    │       Pass 1 — canonical field names (msisdn, name, …)            │
 │    │       Pass 2 — backend aliases (mobilenum, subname, …)            │
 │    │  9. Audit log ─────────────────────────────► Log Dashboard :9000  │
-│    ▼                                                                    │
+│    ▼                                                                         │
 │  Masked JSON → rendered in browser                                      │
 │                                                                         │
-│  Admin GUI :8888  ──── syncs ──► OPA data API /v1/data/masking_config  │
+│  Admin GUI :8888  ──  config stored in PostgreSQL :5432                 │
 │    VIP list · role-field matrix · backend field registry               │
-│    persisted in SQLite, pushed to OPA on every change                  │
+│    served as OPA bundle (GET /bundle/masking_config.tar.gz)            │
+│    OPA polls every 15–60 s — no manual push needed                     │
+│                                                                         │
+│  Log Dashboard :9000 ──► Loki :3100 ──► Grafana :3001 (dashboards)     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,11 +79,13 @@ gateway**, with a live admin console for policy management and multi-backend fie
 
 | Decision | Reason |
 |---|---|
-| JWT decoded locally in Kong | No per-request Keycloak round-trip — lower latency, gateway keeps working if Keycloak is slow |
+| JWT RS256 verified in Kong via JWKS | Full cryptographic signature check — no per-request Keycloak round-trip; JWKS cached 5 min per Kong worker; key rotation handled by invalidating cache on unknown `kid` |
 | OPA for masking decisions | Policy as code, live updates via Admin GUI without gateway restart |
-| Admin service as OPA data source | VIP list and masking rules are operational config, not code — owned by ops, not engineers |
+| Admin service as OPA bundle server | VIP list and masking rules are operational config, not code — served as a versioned gzip tarball; OPA polls every 15–60 s, no manual push after restart |
+| PostgreSQL for Admin Service and Keycloak | Durable, crash-safe storage; both services share a single Postgres instance with separate databases (`keycloak` and `admindb`) |
 | Backend field alias registry | One role × field matrix applies to all backends; alias mapping is data, not code |
 | Two-pass Lua masking | Pass 1 for canonical names, Pass 2 for backend-specific aliases with double-masking guard |
+| Loki + Grafana for audit log persistence | Audit events forwarded from Log Dashboard to Loki (fire-and-forget); Grafana pre-provisions 6 panels — VIP alerts, OPA denials, unmask requests, billing, errors |
 | CRM and Billing ports not exposed | All PII access must pass through Kong enforcement |
 
 ---
@@ -91,7 +97,7 @@ Every request through Kong goes through a fixed pipeline of three phases.
 ### Phase 1 — Pre-function (access control, `kong.yml` → `pre-function`)
 
 1. **Extract Bearer token** from `Authorization` header — 401 if missing.
-2. **Decode JWT payload** — base64url-decode the middle segment locally. No Keycloak call.
+2. **Verify JWT RS256 signature** — fetch JWKS from `http://keycloak:8080/realms/demo/protocol/openid-connect/certs`, cache the key set per Kong worker for 5 minutes (keyed `"jwks_v1"` in `kong.cache`). Match the token's `kid` header against cached keys; if the `kid` is unknown, invalidate the cache and re-fetch once (handles key rotation). Convert the matching JWK to PEM via `resty.openssl.pkey`, then call `resty.jwt:verify_jwt_obj` with `valid_issuers` and a 10-second `lifetime_grace_period`. Reject with 401 on any signature or claims failure.
 3. **Pick highest-priority role** from `realm_access.roles` (priority: admin > supervisor > vip_agent > agent/partner).
 4. **Detect backend** from path prefix (`/api/billing/*` → `"billing"`, everything else → `"crm"`).
 5. **Resolve MSISDN → customer_id** (for MSISDN-based routes) by calling CRM's internal `/api/resolve` endpoint. This gives OPA a stable customer_id for the VIP check.
@@ -131,7 +137,7 @@ sequenceDiagram
 
     B->>W: GET /customer/C002
     W->>K: GET /api/customer/C002\nAuthorization: Bearer <JWT>
-    K->>K: Base64url-decode JWT middle segment\nExtract role from realm_access.roles
+    K->>K: Fetch JWKS (5-min cache, match kid)\nVerify RS256 signature + claims\nExtract role from realm_access.roles
     K->>OPA: POST /v1/data/data_masking\n{role:"agent", customer_id:"C002",\n path:"/api/customer/C002", backend:"crm"}
     OPA-->>K: {allow:true, is_vip:false,\n masked_fields:["name","msisdn","email",\n "national_id","address","last_call_duration",\n "data_roaming_gb","last_location"],\n backend_fields:{}}
     K->>CRM: GET /api/customer/C002
@@ -190,7 +196,7 @@ sequenceDiagram
     Note over W,K: supervisor role — /api/unmask rewrites to /api/customer upstream
 
     W->>K: GET /api/unmask/C002\nAuthorization: Bearer <SUPER_JWT>\nX-Unmask-Reason: Billing dispute ref #4521
-    K->>K: Decode JWT → role="supervisor"
+    K->>K: Verify JWT RS256 → role="supervisor"
     K->>OPA: POST /v1/data/data_masking\n{role:"supervisor", customer_id:"C002",\n path:"/api/unmask/C002", backend:"crm"}
     OPA-->>K: {allow:true, is_vip:false, masked_fields:[]}
     Note over K: OPA returns masked_fields=[] for /api/unmask path
@@ -265,7 +271,7 @@ sequenceDiagram
     KC-->>P: {access_token:"<JWT with role=partner>", ...}
 
     P->>K: GET /api/customer/C002\nAuthorization: Bearer <PARTNER_JWT>
-    K->>K: Decode JWT → realm_access.roles=["partner"]
+    K->>K: Verify JWT RS256 → realm_access.roles=["partner"]
     K->>OPA: {role:"partner", customer_id:"C002", path:"/api/customer/C002"}
     OPA-->>K: {allow:true, is_vip:false,\n masked_fields:["name","msisdn","email","national_id",\n "address","last_call_duration","data_roaming_gb","last_location"]}
     Note over OPA: Partner always gets full L1+L2 masking\nCannot access VIP customers\nCannot call /api/unmask
@@ -318,12 +324,12 @@ masking matrix to apply across all backends.
 
 ```
 Admin GUI
-  └─ field_mappings table (SQLite)
+  └─ field_mappings table (PostgreSQL)
        billing/mobilenum → canonical:msisdn, L1
        billing/subname   → canonical:name,   L1
        ...
        │
-       ▼ pushed to OPA via /v1/data/masking_config
+       ▼ served as bundle: GET /bundle/masking_config.tar.gz
 OPA policy.rego
   └─ backend_fields rule
        input.backend = "billing"
@@ -425,12 +431,15 @@ Rules enforced at the OPA layer (cannot be bypassed even with valid tokens):
 | Service | URL | Purpose |
 |---|---|---|
 | Website | http://localhost:3000 | Agent-facing CRM portal (OIDC login, search, VIP flow) |
-| Keycloak | http://localhost:8080 | Identity provider — OIDC, JWT issuer |
-| Kong Gateway | http://localhost:8000 | API gateway — JWT decode, OPA, masking, audit |
+| Keycloak | http://localhost:8080 | Identity provider — OIDC, RS256 JWT issuer (backed by PostgreSQL) |
+| Kong Gateway | http://localhost:8000 | API gateway — JWT RS256 verify, OPA, masking, audit |
 | Kong Admin | http://localhost:8001 | Kong admin API (read-only metrics / config inspection) |
-| OPA | http://localhost:8181 | Policy engine |
+| OPA | http://localhost:8181 | Policy engine — bundle mode, polls admin-service every 15–60 s |
 | Admin GUI | http://localhost:8888 | Live policy configuration (VIP, roles, backends) |
-| Log Dashboard | http://localhost:9000 | Real-time audit log viewer |
+| Log Dashboard | http://localhost:9000 | Real-time audit log viewer (forwards events to Loki) |
+| Loki | http://localhost:3100 | Log aggregation — persists audit events from Log Dashboard |
+| Grafana | http://localhost:3001 | Pre-built dashboards — VIP alerts, OPA denials, unmask, billing |
+| PostgreSQL | localhost:5432 | Persistent storage for Keycloak (`keycloak` DB) and Admin Service (`admindb`) |
 | CRM Mock | internal only | Raw customer data — canonical PII field names |
 | Billing Mock | internal only | Raw subscriber data — aliased PII field names |
 
@@ -444,9 +453,11 @@ cd Data-Masking
 docker compose up --build
 ```
 
-First boot takes **2–3 minutes** — Keycloak must finish importing the `demo` realm and the Admin
-Service must seed the database and push config to OPA before Kong starts. Docker Compose enforces
-the startup order via healthchecks.
+First boot takes **3–4 minutes** — PostgreSQL initialises both databases (`keycloak` and `admindb`),
+Keycloak imports the `demo` realm, and the Admin Service seeds its tables before Kong starts.
+OPA receives its first bundle from the Admin Service within a few seconds of OPA coming up.
+Docker Compose enforces the startup order via healthchecks — nothing starts until its dependency
+is healthy.
 
 Once all containers are up, open **http://localhost:3000**.
 
@@ -832,12 +843,17 @@ curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
 
 ## OPA policy internals
 
-**Policy file**: `opa/policy.rego`
+**Policy file**: `opa/policy.rego`  
+**Runtime config**: `opa/opa-config.yaml`
 
-OPA runs in **v0-compatible mode** (`--v0-compatible`). The masking config is not baked into
-the policy — it is pushed at runtime by the Admin Service via `PUT /v1/data/masking_config`.
+OPA runs in **v0-compatible mode** (`--v0-compatible`) with **bundle mode** enabled.
+The masking config is not baked into the policy — the Admin Service serves it as a gzip tarball
+at `GET /bundle/masking_config.tar.gz`. OPA polls every 15–60 seconds, so changes made via the
+Admin GUI automatically take effect without a manual sync. **Decision logging** is enabled
+(`decision_logs.console: true`) — every policy evaluation is emitted as structured JSON to
+stdout, captured by Docker and queryable via Loki/Grafana.
 
-### Data shape pushed by admin-service
+### Data shape served by admin-service bundle
 
 ```json
 {
@@ -938,14 +954,14 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 
 | Page | Path | What you can do |
 |---|---|---|
-| Dashboard | `/` | Summary cards: VIP count, active mask rules, role count, backend count, OPA sync status |
-| VIP Customers | `/vip` | Add or remove VIP customer IDs — syncs to OPA immediately |
-| Masking Rules | `/roles` | Checkbox matrix of role × field — save pushes live to OPA |
+| Dashboard | `/` | Summary cards: VIP count, active mask rules, role count, backend count, last sync time |
+| VIP Customers | `/vip` | Add or remove VIP customer IDs — OPA picks up the change within 60 s |
+| Masking Rules | `/roles` | Checkbox matrix of role × field — save persists to PostgreSQL; OPA re-polls automatically |
 | Backends | `/backends` | Register backends, add/remove field alias mappings |
-| Sync OPA | POST `/sync` | Force re-push of all config (use after OPA restart) |
-| Live config | GET `/api/config` | JSON view of the exact payload currently in OPA |
+| Sync OPA | POST `/sync` | Records a sync_log entry and returns a reminder that OPA will re-poll within 60 s (bundle mode — no direct push) |
+| Live config | GET `/api/config` | JSON view of the exact masking_config payload the bundle currently serves |
 
-**Changes take effect on the next request — no gateway or policy engine restart needed.**
+**Changes persist to PostgreSQL immediately and are reflected in OPA within 15–60 seconds — no gateway or policy engine restart needed.**
 
 ---
 
@@ -954,6 +970,14 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 ```
 .
 ├── docker-compose.yml          Service wiring, healthchecks, startup ordering
+│                               Services: postgres, keycloak, opa, admin-service,
+│                               kong, crm-mock, billing-mock, website,
+│                               log-dashboard, loki, grafana
+│
+├── postgres/
+│   └── init.sql                Runs once on first volume creation: creates the
+│                               admindb database + adminuser (Keycloak uses the
+│                               default keycloak DB created by the image)
 │
 ├── keycloak/
 │   └── realm-config.json       Auto-imported realm: users (agent1, supervisor1,
@@ -961,9 +985,11 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 │                               partner-client), service account for partner
 │
 ├── opa/
-│   └── policy.rego             Access + masking policy (v0 syntax)
-│                               References data.masking_config (pushed by
-│                               admin-service at startup and on each change)
+│   ├── policy.rego             Access + masking policy (v0 syntax)
+│   │                           References data.masking_config loaded via bundle
+│   └── opa-config.yaml         Bundle mode config: polls admin-service every
+│                               15–60 s; decision_logs.console=true (structured
+│                               JSON to stdout for Loki capture)
 │
 ├── kong/
 │   └── kong.yml                DB-less declarative config
@@ -971,15 +997,19 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 │                               ├─ routes: customer, unmask, subscription, billing
 │                               └─ plugins (global):
 │                                   cors         — CORS headers
-│                                   pre-function — JWT decode, MSISDN resolve,
+│                                   pre-function — JWT RS256 verify (JWKS fetch +
+│                                                  per-worker 5-min cache + kid
+│                                                  rotation), MSISDN resolve,
 │                                                  OPA call, VIP/unmask enforce
 │                                   post-function — two-pass masking + audit log
 │
 ├── admin-service/
-│   ├── app.py                  Flask + SQLite CRUD
+│   ├── app.py                  Flask + PostgreSQL CRUD (psycopg2-binary)
 │   │                           Tables: fields, vip_customers, role_masked_fields,
 │   │                                   backends, field_mappings, sync_log
-│   │                           Pushes to OPA /v1/data/masking_config on every change
+│   │                           GET /bundle/masking_config.tar.gz — gzip tarball
+│   │                           consumed by OPA bundle polling
+│   ├── requirements.txt        flask, requests, psycopg2-binary
 │   └── templates/
 │       ├── base.html           Bootstrap 5 nav shell
 │       ├── dashboard.html      5-card summary + masking matrix + sync log
@@ -1018,10 +1048,23 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 │       └── subscriber.html     Billing subscriber detail: aliased fields with
 │                               canonical mapping + L1/L2 badges
 │
-└── log-dashboard/
-    └── app.py                  Flask SSE receiver — real-time audit log viewer
-                                Receives events from Kong, website, CRM mock,
-                                billing mock; persists to in-memory list
+├── log-dashboard/
+│   ├── app.py                  Flask SSE receiver — receives audit events from
+│   │                           Kong and forwards each to Loki (fire-and-forget
+│   │                           daemon thread, 1 s timeout); in-memory ring
+│   │                           buffer (last 500 events) for /logs SSE stream
+│   └── requirements.txt        flask, requests
+│
+└── grafana/
+    └── provisioning/
+        ├── datasources/
+        │   └── loki.yaml       Auto-provisions Loki datasource at http://loki:3100
+        └── dashboards/
+            ├── dashboard.yaml  File provider config
+            └── data-masking.json  6-panel dashboard:
+                                   All Events · VIP Access Alerts · OPA Denials
+                                   Unmask Requests · Errors & Warnings
+                                   Billing Backend Requests
 ```
 
 ---
@@ -1031,42 +1074,81 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 Docker Compose enforces this sequence:
 
 ```
-log-dashboard (healthy)
-  ├─► crm-mock    (healthy)
-  ├─► billing-mock (healthy)
-  └─► admin-service (healthy — seeds DB, syncs config to OPA)
-        └─► kong (started — OPA data ready before first request)
+postgres (healthy — creates keycloak DB + admindb via init.sql)
+  ├─► keycloak (started — imports demo realm; retries until postgres is healthy)
+  │     └─► website (started — retries OIDC redirect until Keycloak realm is ready)
+  └─► admin-service (healthy — connects to admindb, seeds tables)
+        └─► opa (started — immediately polls /bundle/masking_config.tar.gz)
 
-keycloak (started — realm import completes asynchronously)
-  └─► website (started — retries login redirect until Keycloak realm is ready)
+loki (healthy)
+  └─► log-dashboard (healthy — ready to receive audit events and forward to Loki)
+        ├─► crm-mock    (healthy)
+        ├─► billing-mock (healthy)
+        └─► kong (started — all dependencies healthy, first request is safe)
+
+grafana (started — auto-provisions Loki datasource + data-masking dashboard)
 ```
 
-Kong will not start until Admin Service is healthy, guaranteeing OPA always has masking rules
-loaded before the first request. Keycloak and the Website use `restart: on-failure` to handle
-the realm import timing.
+Key guarantees:
+- Kong never starts until Admin Service is healthy, so OPA has received its first bundle before any request arrives.
+- OPA never starts until Admin Service is healthy, so the first bundle poll always succeeds.
+- Log Dashboard is healthy before Kong starts, so no audit events are lost.
+- Loki is healthy before Log Dashboard starts, so forwarded events land immediately.
+- Keycloak and Website use `restart: on-failure` to handle realm import timing.
 
 ---
 
 ## Production notes
 
-**JWT signature verification**: The demo decodes the JWT payload locally (base64url only — no
-signature check). In production, add Kong's built-in `jwt` plugin before the pre-function.
-The `jwt` plugin verifies the signature against Keycloak JWKS; the pre-function then reads the
-already-validated claims. No Lua code changes required.
+### Implemented hardening
 
-**OPA persistence**: OPA holds masking config in memory. On restart, the Admin Service must
-re-sync — use the Dashboard "Sync OPA" button or `POST /sync`. For production, use OPA
-[bundle mode](https://www.openpolicyagent.org/docs/latest/management-bundles/) for versioned,
-persistent policy distribution.
+**JWT RS256 signature verification** ✅  
+Kong fetches JWKS from Keycloak, caches per worker (5-min TTL), and verifies every token's
+RS256 signature before reading claims. Key rotation is handled automatically — on unknown `kid`,
+the cache is invalidated and keys are re-fetched once.
 
-**Secrets**: Client secrets and admin passwords are hardcoded for demo convenience. In
-production, inject via a secrets manager (e.g. Vault, AWS Secrets Manager) and rotate regularly.
+**PostgreSQL persistence** ✅  
+Both Keycloak and the Admin Service use a shared PostgreSQL 16 instance with separate databases.
+Data survives container restarts via the `postgres-data` Docker volume.
 
-**Admin service database**: SQLite suits single-instance demos. In production, replace with
-Postgres and enable proper backup and WAL-mode write durability. The `sync_log` table also
-serves as an audit trail for policy changes.
+**OPA bundle mode** ✅  
+OPA polls the Admin Service for a gzip bundle every 15–60 seconds. Config is never lost on
+restart — no manual re-sync required. Decision logging (`decision_logs.console: true`) emits
+every evaluation as structured JSON to stdout, queryable via Loki.
 
-**Backend MSISDN resolution**: Kong calls CRM `/api/resolve?msisdn=` synchronously on every
-MSISDN-based request to get the customer_id for the OPA VIP check. For billing subscribers,
-resolution is best-effort (no CRM record → `customer_id=""` → treated as non-VIP). Cache this
-lookup in production if CRM latency is a concern.
+**Persistent audit log** ✅  
+Log Dashboard forwards every audit event to Loki (fire-and-forget). Grafana at `:3001`
+auto-provisions a dashboard with 6 panels: All Events, VIP Access Alerts, OPA Denials, Unmask
+Requests, Errors & Warnings, Billing Backend Requests.
+
+---
+
+### Remaining gaps for production
+
+**Secrets management**  
+Client secrets and admin passwords are hardcoded for demo convenience. In production, inject
+via a secrets manager (Vault, AWS Secrets Manager, etc.) and rotate regularly. The Keycloak
+admin password, partner client secret, and PostgreSQL credentials are the highest-priority items.
+
+**TLS everywhere**  
+All internal service-to-service calls (Kong→OPA, Kong→CRM, Admin→Postgres, Kong→Keycloak JWKS)
+and external endpoints use plain HTTP. In production, terminate TLS at Kong and use mutual TLS
+for internal east-west traffic.
+
+**Rate limiting and CSRF**  
+Kong has no rate-limit plugin configured. The Admin GUI has no CSRF protection. Add Kong's
+`rate-limiting` plugin and CSRF tokens to the admin service before exposing to a wider network.
+
+**Input validation**  
+Customer IDs and MSISDN values are passed to CRM/Billing as-is. Add allow-list validation in
+the Kong pre-function before constructing upstream URLs.
+
+**High availability**  
+The stack is single-instance. For production, run Kong in DB-backed cluster mode, replicate
+Postgres with streaming replication, and deploy OPA as a sidecar or replicated service behind
+a load balancer.
+
+**Backend MSISDN resolution caching**  
+Kong calls CRM `/api/resolve?msisdn=` synchronously on every MSISDN-based request. For billing
+subscribers the lookup is best-effort (`customer_id=""` → treated as non-VIP). Cache this in
+Kong's shared dictionary (`kong.cache`) to reduce CRM latency impact.
