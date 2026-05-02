@@ -313,13 +313,16 @@ def dashboard():
 
 @app.get("/health")
 def health():
+    conn = None
     try:
         conn = get_db()
         scalar(conn, "SELECT 1")
-        conn.close()
         return jsonify({"status": "ok"})
     except Exception as exc:
         return jsonify({"status": "error", "detail": str(exc)}), 503
+    finally:
+        if conn:
+            conn.close()
 
 
 # ── VIP management ────────────────────────────────────────────────────────────
