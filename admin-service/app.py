@@ -1,19 +1,25 @@
+import io
+import json
 import os
-import sqlite3
+import tarfile
 import time
 import requests
+import psycopg2
+import psycopg2.extras
+import psycopg2.errors
 from datetime import datetime
 from functools import wraps
-from flask import (Flask, render_template, request, redirect,
+from flask import (Flask, make_response, render_template, request, redirect,
                    url_for, session, flash, jsonify)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "admin-secret-key")
 
-OPA_URL    = os.environ.get("OPA_URL",          "http://opa:8181")
-ADMIN_USER = os.environ.get("ADMIN_USER",       "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASSWORD",   "admin123")
-DB_PATH    = os.environ.get("DB_PATH",          "/data/admin.db")
+OPA_URL      = os.environ.get("OPA_URL",        "http://opa:8181")
+ADMIN_USER   = os.environ.get("ADMIN_USER",     "admin")
+ADMIN_PASS   = os.environ.get("ADMIN_PASSWORD", "admin123")
+DATABASE_URL = os.environ.get("DATABASE_URL",
+               "postgresql://adminuser:admin_pass@postgres:5432/admindb")
 
 # Ordered list of (field, classification) — drives both DB and UI
 FIELDS = [
@@ -45,15 +51,12 @@ _DEFAULT_VIPS = [
     ("C004", "Initial VIP – seeded on first run"),
 ]
 
-# Backend registry — seeded on first run
 _DEFAULT_BACKENDS = [
     ("crm",     "CRM System",      "http://crm-mock:5000",     "Main CRM — field names are canonical"),
     ("billing", "Billing System",  "http://billing-mock:5001", "Billing backend — aliased field names"),
 ]
 
-# Per-backend field mappings: (backend_id, backend_field, canonical_field, classification)
 _DEFAULT_FIELD_MAPPINGS = [
-    # CRM fields match canonical names
     ("crm", "name",               "name",               "L1"),
     ("crm", "msisdn",             "msisdn",             "L1"),
     ("crm", "email",              "email",              "L1"),
@@ -62,7 +65,6 @@ _DEFAULT_FIELD_MAPPINGS = [
     ("crm", "last_call_duration", "last_call_duration", "L2"),
     ("crm", "data_roaming_gb",    "data_roaming_gb",    "L2"),
     ("crm", "last_location",      "last_location",      "L2"),
-    # Billing fields with different names
     ("billing", "mobilenum",        "msisdn",             "L1"),
     ("billing", "subname",          "name",               "L1"),
     ("billing", "ic_num",           "national_id",        "L1"),
@@ -72,89 +74,123 @@ _DEFAULT_FIELD_MAPPINGS = [
 ]
 
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# ── Database helpers ──────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
+
+def qrows(conn, sql, params=()):
+    """Return list of RealDictRow from a SELECT."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def qone(conn, sql, params=()):
+    """Return single RealDictRow or None."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return cur.fetchone()
+
+
+def scalar(conn, sql, params=()):
+    """Return first column of first row as a scalar value."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def execute(conn, sql, params=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def executemany(conn, sql, params_list):
+    with conn.cursor() as cur:
+        cur.executemany(sql, params_list)
+
+
+# ── Schema init ───────────────────────────────────────────────────────────────
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS vip_customers (
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS vip_customers (
             customer_id TEXT PRIMARY KEY,
             added_by    TEXT DEFAULT 'system',
             added_at    TEXT NOT NULL,
             notes       TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS role_field_masks (
+        )""",
+        """CREATE TABLE IF NOT EXISTS role_field_masks (
             role  TEXT NOT NULL,
             field TEXT NOT NULL,
             PRIMARY KEY (role, field)
-        );
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS sync_log (
+            id        SERIAL PRIMARY KEY,
             synced_at TEXT NOT NULL,
             status    TEXT NOT NULL,
             message   TEXT
-        );
-        CREATE TABLE IF NOT EXISTS backends (
+        )""",
+        """CREATE TABLE IF NOT EXISTS backends (
             backend_id   TEXT PRIMARY KEY,
             backend_name TEXT NOT NULL,
             base_url     TEXT DEFAULT '',
             description  TEXT DEFAULT '',
             created_at   TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS field_mappings (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            backend_id     TEXT NOT NULL REFERENCES backends(backend_id) ON DELETE CASCADE,
-            backend_field  TEXT NOT NULL,
+        )""",
+        """CREATE TABLE IF NOT EXISTS field_mappings (
+            id              SERIAL PRIMARY KEY,
+            backend_id      TEXT NOT NULL REFERENCES backends(backend_id) ON DELETE CASCADE,
+            backend_field   TEXT NOT NULL,
             canonical_field TEXT NOT NULL,
-            classification TEXT NOT NULL DEFAULT 'L1',
+            classification  TEXT NOT NULL DEFAULT 'L1',
             UNIQUE(backend_id, backend_field)
-        );
-    """)
+        )""",
+    ]
+    for stmt in stmts:
+        execute(conn, stmt)
+
     now = datetime.utcnow().isoformat()
-    if not conn.execute("SELECT 1 FROM vip_customers LIMIT 1").fetchone():
-        conn.executemany(
+    if not qone(conn, "SELECT 1 FROM vip_customers LIMIT 1"):
+        executemany(conn,
             "INSERT INTO vip_customers (customer_id, added_by, added_at, notes) "
-            "VALUES (?, 'system', ?, ?)",
+            "VALUES (%s, 'system', %s, %s)",
             [(cid, now, note) for cid, note in _DEFAULT_VIPS],
         )
-    if not conn.execute("SELECT 1 FROM role_field_masks LIMIT 1").fetchone():
-        conn.executemany(
-            "INSERT INTO role_field_masks (role, field) VALUES (?, ?)",
+    if not qone(conn, "SELECT 1 FROM role_field_masks LIMIT 1"):
+        executemany(conn,
+            "INSERT INTO role_field_masks (role, field) VALUES (%s, %s)",
             _DEFAULT_MASKS,
         )
-    if not conn.execute("SELECT 1 FROM backends LIMIT 1").fetchone():
-        conn.executemany(
+    if not qone(conn, "SELECT 1 FROM backends LIMIT 1"):
+        executemany(conn,
             "INSERT INTO backends (backend_id, backend_name, base_url, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s)",
             [(bid, name, url, desc, now) for bid, name, url, desc in _DEFAULT_BACKENDS],
         )
-    if not conn.execute("SELECT 1 FROM field_mappings LIMIT 1").fetchone():
-        conn.executemany(
+    if not qone(conn, "SELECT 1 FROM field_mappings LIMIT 1"):
+        executemany(conn,
             "INSERT INTO field_mappings (backend_id, backend_field, canonical_field, classification) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s)",
             _DEFAULT_FIELD_MAPPINGS,
         )
     conn.commit()
     conn.close()
 
 
-# ── Config assembly + OPA sync ────────────────────────────────────────────────
+# ── Config assembly ───────────────────────────────────────────────────────────
 
 def get_config():
     conn = get_db()
-    vip_rows     = conn.execute("SELECT customer_id FROM vip_customers").fetchall()
-    mask_rows    = conn.execute("SELECT role, field FROM role_field_masks").fetchall()
-    mapping_rows = conn.execute(
+    vip_rows     = qrows(conn, "SELECT customer_id FROM vip_customers")
+    mask_rows    = qrows(conn, "SELECT role, field FROM role_field_masks")
+    mapping_rows = qrows(conn,
         "SELECT backend_id, backend_field, canonical_field, classification "
         "FROM field_mappings ORDER BY backend_id, backend_field"
-    ).fetchall()
+    )
     conn.close()
 
     vip_customers = {row["customer_id"]: True for row in vip_rows}
@@ -170,8 +206,8 @@ def get_config():
         if bid not in backends:
             backends[bid] = {}
         backends[bid][row["backend_field"]] = {
-            "canonical":       row["canonical_field"],
-            "classification":  row["classification"],
+            "canonical":      row["canonical_field"],
+            "classification": row["classification"],
         }
 
     return {
@@ -181,34 +217,50 @@ def get_config():
     }
 
 
-def sync_to_opa(retries=3):
-    config  = get_config()
-    status  = "error"
-    message = "no attempt"
-    for attempt in range(retries):
-        try:
-            resp = requests.put(
-                f"{OPA_URL}/v1/data/masking_config",
-                json=config, timeout=5,
-            )
-            if resp.status_code in (200, 204):
-                status  = "ok"
-                message = f"HTTP {resp.status_code}"
-                break
-            message = f"HTTP {resp.status_code}"
-        except Exception as exc:
-            message = str(exc)
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+# ── OPA sync (bundle mode: logs the attempt; OPA polls /bundle endpoint) ──────
 
+def sync_to_opa(retries=3):
+    """
+    In bundle mode OPA polls /bundle/masking_config.tar.gz automatically.
+    This function is kept for the sync_log audit trail and the manual /sync
+    button — it records the attempt but does not PUT to the OPA data API
+    (which would return 400 when a bundle owns that path).
+    """
+    status  = "ok"
+    message = "bundle mode — OPA polls /bundle/masking_config.tar.gz automatically (≤60s)"
     conn = get_db()
-    conn.execute(
-        "INSERT INTO sync_log (synced_at, status, message) VALUES (?, ?, ?)",
+    execute(conn,
+        "INSERT INTO sync_log (synced_at, status, message) VALUES (%s, %s, %s)",
         (datetime.utcnow().isoformat(), status, message),
     )
     conn.commit()
     conn.close()
-    return status == "ok", message
+    return True, message
+
+
+# ── OPA bundle endpoint (Item 9) ──────────────────────────────────────────────
+
+def build_bundle():
+    """Build a gzipped tar bundle containing masking_config/data.json."""
+    config     = get_config()
+    data_bytes = json.dumps(config).encode("utf-8")
+    buf        = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info      = tarfile.TarInfo(name="masking_config/data.json")
+        info.size = len(data_bytes)
+        tar.addfile(info, io.BytesIO(data_bytes))
+    buf.seek(0)
+    return buf.read()
+
+
+@app.get("/bundle/masking_config.tar.gz")
+def bundle_endpoint():
+    """OPA polls this endpoint for the masking_config bundle."""
+    data = build_bundle()
+    resp = make_response(data)
+    resp.headers["Content-Type"]        = "application/gzip"
+    resp.headers["Content-Disposition"] = "attachment; filename=masking_config.tar.gz"
+    return resp
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -246,11 +298,9 @@ def logout():
 def dashboard():
     config = get_config()
     conn   = get_db()
-    recent_syncs  = conn.execute(
-        "SELECT * FROM sync_log ORDER BY id DESC LIMIT 5"
-    ).fetchall()
-    backend_count = conn.execute("SELECT COUNT(*) FROM backends").fetchone()[0]
-    mapping_count = conn.execute("SELECT COUNT(*) FROM field_mappings").fetchone()[0]
+    recent_syncs  = qrows(conn, "SELECT * FROM sync_log ORDER BY id DESC LIMIT 5")
+    backend_count = scalar(conn, "SELECT COUNT(*) FROM backends")
+    mapping_count = scalar(conn, "SELECT COUNT(*) FROM field_mappings")
     conn.close()
     total_mask_count = sum(len(v) for v in config["role_masked_fields"].values())
     return render_template("dashboard.html",
@@ -263,7 +313,13 @@ def dashboard():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok"})
+    try:
+        conn = get_db()
+        scalar(conn, "SELECT 1")
+        conn.close()
+        return jsonify({"status": "ok"})
+    except Exception as exc:
+        return jsonify({"status": "error", "detail": str(exc)}), 503
 
 
 # ── VIP management ────────────────────────────────────────────────────────────
@@ -271,10 +327,8 @@ def health():
 @app.get("/vip")
 @login_required
 def vip_list():
-    conn = get_db()
-    customers = conn.execute(
-        "SELECT * FROM vip_customers ORDER BY added_at DESC"
-    ).fetchall()
+    conn      = get_db()
+    customers = qrows(conn, "SELECT * FROM vip_customers ORDER BY added_at DESC")
     conn.close()
     return render_template("vip.html", customers=customers)
 
@@ -289,9 +343,9 @@ def vip_add():
         return redirect(url_for("vip_list"))
     conn = get_db()
     try:
-        conn.execute(
+        execute(conn,
             "INSERT INTO vip_customers (customer_id, added_by, added_at, notes) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s)",
             (cid, ADMIN_USER, datetime.utcnow().isoformat(), notes),
         )
         conn.commit()
@@ -300,7 +354,8 @@ def vip_add():
             f"Added {cid} as VIP " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
             "success" if ok else "warning",
         )
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         flash(f"'{cid}' is already a VIP customer", "warning")
     finally:
         conn.close()
@@ -311,7 +366,7 @@ def vip_add():
 @login_required
 def vip_remove(customer_id):
     conn = get_db()
-    conn.execute("DELETE FROM vip_customers WHERE customer_id = ?", (customer_id,))
+    execute(conn, "DELETE FROM vip_customers WHERE customer_id = %s", (customer_id,))
     conn.commit()
     conn.close()
     ok, msg = sync_to_opa()
@@ -327,8 +382,8 @@ def vip_remove(customer_id):
 @app.get("/roles")
 @login_required
 def roles_view():
-    conn = get_db()
-    mask_rows = conn.execute("SELECT role, field FROM role_field_masks").fetchall()
+    conn      = get_db()
+    mask_rows = qrows(conn, "SELECT role, field FROM role_field_masks")
     conn.close()
     masked = {role: {f: False for f, _ in FIELDS} for role in ROLES}
     for row in mask_rows:
@@ -340,17 +395,17 @@ def roles_view():
 @app.post("/roles/save")
 @login_required
 def roles_save():
-    conn = get_db()
-    conn.execute("DELETE FROM role_field_masks")
+    conn    = get_db()
     inserts = [
         (role, field)
         for role in ROLES
         for field, _ in FIELDS
         if request.form.get(f"{role}__{field}")
     ]
+    execute(conn, "DELETE FROM role_field_masks")
     if inserts:
-        conn.executemany(
-            "INSERT INTO role_field_masks (role, field) VALUES (?, ?)", inserts
+        executemany(conn,
+            "INSERT INTO role_field_masks (role, field) VALUES (%s, %s)", inserts
         )
     conn.commit()
     conn.close()
@@ -367,15 +422,10 @@ def roles_save():
 @app.get("/backends")
 @login_required
 def backends_list():
-    conn = get_db()
-    backends = conn.execute(
-        "SELECT * FROM backends ORDER BY backend_id"
-    ).fetchall()
-    mappings = conn.execute(
-        "SELECT * FROM field_mappings ORDER BY backend_id, backend_field"
-    ).fetchall()
+    conn     = get_db()
+    backends = qrows(conn, "SELECT * FROM backends ORDER BY backend_id")
+    mappings = qrows(conn, "SELECT * FROM field_mappings ORDER BY backend_id, backend_field")
     conn.close()
-    # Group mappings by backend_id
     mapped = {}
     for m in mappings:
         mapped.setdefault(m["backend_id"], []).append(m)
@@ -388,25 +438,26 @@ def backends_list():
 @app.post("/backends/add")
 @login_required
 def backend_add():
-    bid   = (request.form.get("backend_id")   or "").strip().lower()
-    name  = (request.form.get("backend_name") or "").strip()
-    url   = (request.form.get("base_url")     or "").strip()
-    desc  = (request.form.get("description")  or "").strip()
+    bid  = (request.form.get("backend_id")   or "").strip().lower()
+    name = (request.form.get("backend_name") or "").strip()
+    url  = (request.form.get("base_url")     or "").strip()
+    desc = (request.form.get("description")  or "").strip()
     if not bid or not name:
         flash("Backend ID and name are required", "danger")
         return redirect(url_for("backends_list"))
     conn = get_db()
     try:
-        conn.execute(
+        execute(conn,
             "INSERT INTO backends (backend_id, backend_name, base_url, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s)",
             (bid, name, url, desc, datetime.utcnow().isoformat()),
         )
         conn.commit()
         ok, msg = sync_to_opa()
         flash(f"Backend '{bid}' added " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
               "success" if ok else "warning")
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         flash(f"Backend ID '{bid}' already exists", "warning")
     finally:
         conn.close()
@@ -417,7 +468,7 @@ def backend_add():
 @login_required
 def backend_delete(backend_id):
     conn = get_db()
-    conn.execute("DELETE FROM backends WHERE backend_id = ?", (backend_id,))
+    execute(conn, "DELETE FROM backends WHERE backend_id = %s", (backend_id,))
     conn.commit()
     conn.close()
     ok, msg = sync_to_opa()
@@ -437,16 +488,17 @@ def field_mapping_add(backend_id):
         return redirect(url_for("backends_list"))
     conn = get_db()
     try:
-        conn.execute(
+        execute(conn,
             "INSERT INTO field_mappings (backend_id, backend_field, canonical_field, classification) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s)",
             (backend_id, bfield, canon, cls),
         )
         conn.commit()
         ok, msg = sync_to_opa()
         flash(f"Mapping {bfield}→{canon} added " + ("– synced ✓" if ok else f"– sync failed: {msg}"),
               "success" if ok else "warning")
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         flash(f"Field '{bfield}' already mapped for backend '{backend_id}'", "warning")
     finally:
         conn.close()
@@ -457,8 +509,8 @@ def field_mapping_add(backend_id):
 @login_required
 def field_mapping_delete(backend_id, field_id):
     conn = get_db()
-    conn.execute("DELETE FROM field_mappings WHERE id = ? AND backend_id = ?",
-                 (field_id, backend_id))
+    execute(conn, "DELETE FROM field_mappings WHERE id = %s AND backend_id = %s",
+            (field_id, backend_id))
     conn.commit()
     conn.close()
     ok, msg = sync_to_opa()
@@ -473,8 +525,7 @@ def field_mapping_delete(backend_id, field_id):
 @login_required
 def manual_sync():
     ok, msg = sync_to_opa()
-    flash(f"OPA sync {'succeeded ✓' if ok else 'failed: ' + msg}",
-          "success" if ok else "danger")
+    flash(f"OPA re-polls bundle within 60s. {msg}", "success" if ok else "danger")
     return redirect(url_for("dashboard"))
 
 
@@ -487,13 +538,14 @@ def api_config():
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    init_db()
-    print("Waiting for OPA and pushing initial config…")
-    for i in range(6):
-        ok, msg = sync_to_opa(retries=1)
-        if ok:
-            print(f"OPA sync OK: {msg}")
+    # Retry DB connection — Postgres may still be initialising
+    for i in range(10):
+        try:
+            init_db()
+            print("Database initialised ✓")
             break
-        print(f"OPA not ready ({msg}), retry in {2**i}s…")
-        time.sleep(2 ** i)
+        except Exception as exc:
+            wait = 2 ** i
+            print(f"DB not ready ({exc}), retry in {wait}s…")
+            time.sleep(wait)
     app.run(host="0.0.0.0", port=8888, debug=False)

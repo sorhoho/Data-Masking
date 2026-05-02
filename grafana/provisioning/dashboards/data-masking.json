@@ -1,0 +1,82 @@
+{
+  "title": "Data Masking — Audit Logs",
+  "uid": "data-masking-audit",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "All Events",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\"} | json",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "VIP Access Alerts",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\", service=\"kong\"} | json | event=`vip_access_alert`",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "OPA Denials",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\", service=\"kong\"} | json | opa_decision=`DENY`",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 4,
+      "type": "logs",
+      "title": "Unmask Requests",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\"} | json | event=`unmask_request`",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Errors & Warnings",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\"} | json | level=~`warn|error`",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Billing Backend Requests",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
+      "datasource": "Loki",
+      "options": { "dedupStrategy": "none", "showTime": true, "sortOrder": "Descending" },
+      "targets": [{
+        "expr": "{job=\"data-masking\", service=\"kong\"} | json | backend=`billing`",
+        "refId": "A"
+      }]
+    }
+  ]
+}

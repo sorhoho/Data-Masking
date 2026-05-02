@@ -98,33 +98,73 @@ plugins:
               return json_exit(401, "Invalid Authorization header format")
           end
 
-          -- ── 2. Decode JWT payload (base64url, middle segment) ─────────────
-          local payload_b64 = token:match("^[^.]+%.([^.]+)%.")
-          if not payload_b64 then
+          -- ── 2. Fetch JWKS (cached) + verify RS256 signature ──────────────
+          local KEYCLOAK_ISSUER = "http://keycloak:8080/realms/demo"
+          local JWKS_URL        = KEYCLOAK_ISSUER .. "/protocol/openid-connect/certs"
+          local JWKS_TTL        = 300  -- 5-minute cache; Keycloak rotates keys rarely
+
+          local jwt_lib  = require("resty.jwt")
+          local pkey_lib = require("resty.openssl.pkey")
+
+          local function fetch_jwks()
+              local h = http.new(); h:set_timeout(5000)
+              local r, ferr = h:request_uri(JWKS_URL, { method = "GET" })
+              if not r or r.status ~= 200 then
+                  return nil, "JWKS fetch failed: " .. (ferr or tostring(r and r.status))
+              end
+              local jwks, jerr = cjson.decode(r.body)
+              if not jwks then return nil, "JWKS parse error: " .. (jerr or "?") end
+              return jwks
+          end
+
+          local jwks, cache_err = kong.cache:get("jwks_v1", { ttl = JWKS_TTL }, fetch_jwks)
+          if not jwks then
+              kong.log.err("Cannot load JWKS: ", cache_err)
+              kong.ctx.shared.deny_reason = "jwks_unavailable"
+              return json_exit(503, "Authentication service unavailable")
+          end
+
+          -- Structurally load the JWT (header + payload + signature)
+          local jwt_obj = jwt_lib:load_jwt(token)
+          if not jwt_obj.valid then
               kong.ctx.shared.deny_reason = "malformed_jwt"
               return json_exit(401, "Malformed JWT")
           end
 
-          local function b64url_decode(s)
-              local padded = s:gsub("%-", "+"):gsub("_", "/")
-              local pad = #padded % 4
-              if pad == 2 then padded = padded .. "=="
-              elseif pad == 3 then padded = padded .. "=" end
-              return ngx.decode_base64(padded)
+          -- Match signing key by kid header (fall back to first sig key)
+          local kid     = jwt_obj.header and jwt_obj.header.kid
+          local pem_key = nil
+          for _, jwk in ipairs(jwks.keys or {}) do
+              if jwk.use == "sig" and (not kid or jwk.kid == kid) then
+                  local pkey, pk_err = pkey_lib.new(jwk, "JWK")
+                  if pkey then
+                      pem_key = pkey:tostring("public", "PEM")
+                      break
+                  end
+                  kong.log.warn("JWK→PEM failed: ", pk_err)
+              end
           end
 
-          local decoded = b64url_decode(payload_b64)
-          if not decoded then
-              kong.ctx.shared.deny_reason = "jwt_decode_error"
-              return json_exit(401, "Cannot decode JWT payload")
+          if not pem_key then
+              -- Rotate cache — Keycloak may have rolled keys
+              kong.cache:invalidate("jwks_v1")
+              kong.log.err("No matching JWKS key for kid: ", kid or "(none)")
+              kong.ctx.shared.deny_reason = "jwks_key_not_found"
+              return json_exit(401, "Token signing key not found — please re-authenticate")
           end
 
-          local claims, parse_err = cjson.decode(decoded)
-          if not claims then
-              kong.log.err("Cannot parse JWT claims: ", parse_err)
-              kong.ctx.shared.deny_reason = "jwt_parse_error"
-              return json_exit(401, "Cannot parse JWT claims")
+          -- Cryptographic verification: RS256 signature + iss + exp/nbf
+          local verified = jwt_lib:verify_jwt_obj(pem_key, jwt_obj, {
+              valid_issuers         = { KEYCLOAK_ISSUER },
+              lifetime_grace_period = 10,
+          })
+          if not verified.verified then
+              kong.log.warn("JWT verification failed: ", verified.reason)
+              kong.ctx.shared.deny_reason = "jwt_invalid_signature"
+              return json_exit(401, "Invalid or expired token: " .. (verified.reason or "unknown"))
           end
+
+          local claims = jwt_obj.payload
 
           -- ── 3. Pick highest-priority role from realm_access.roles ─────────
           local realm_roles  = (claims.realm_access or {}).roles or {}

@@ -1,0 +1,20 @@
+# OPA runtime configuration
+# - Bundle mode: OPA polls admin-service for masking_config instead of
+#   relying on the in-memory data API PUT (which would be lost on restart).
+# - Decision logging: every policy evaluation is emitted to stdout as
+#   structured JSON, captured by Docker and queryable via Loki/Grafana.
+
+services:
+  admin_service:
+    url: http://admin-service:8888
+
+bundles:
+  masking_config:
+    resource: "/bundle/masking_config.tar.gz"
+    service: admin_service
+    polling:
+      min_delay_seconds: 15
+      max_delay_seconds: 60
+
+decision_logs:
+  console: true

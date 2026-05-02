@@ -1,10 +1,15 @@
 import json
+import os
 import queue
 import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 
+import requests
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+
+LOKI_URL = os.environ.get("LOKI_URL", "http://loki:3100/loki/api/v1/push")
 
 app = Flask(__name__)
 
@@ -13,6 +18,26 @@ log_buffer  = deque(maxlen=MAX_LOGS)
 buffer_lock = threading.Lock()
 subscribers = []
 subs_lock   = threading.Lock()
+
+
+def push_to_loki(entry):
+    """Forward a log entry to Loki. Fire-and-forget — never blocks callers."""
+    try:
+        labels = {
+            "job":     "data-masking",
+            "service": entry.get("service", "unknown"),
+            "level":   entry.get("level",   "info"),
+        }
+        ts_ns   = str(int(time.time() * 1e9))
+        payload = {
+            "streams": [{
+                "stream": labels,
+                "values": [[ts_ns, json.dumps(entry)]],
+            }]
+        }
+        requests.post(LOKI_URL, json=payload, timeout=1)
+    except Exception:
+        pass  # Loki failure must never surface to callers
 
 
 def broadcast(entry):
@@ -38,6 +63,7 @@ def receive_log():
     with buffer_lock:
         log_buffer.append(entry)
     broadcast(entry)
+    threading.Thread(target=push_to_loki, args=(entry,), daemon=True).start()
     return jsonify({"ok": True})
 
 
