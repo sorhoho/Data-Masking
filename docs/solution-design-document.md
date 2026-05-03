@@ -188,7 +188,7 @@ The Kong Admin API (`:8001`) must not be externally reachable. It is currently m
 
 | Attribute | Value |
 |---|---|
-| Version | v1.4.2 (pinned; OPA monthly releases, no formal EOL policy) |
+| Version | 1.16.1 (pinned; OPA monthly releases, no formal EOL policy) |
 | Rego compatibility | `--v0-compatible` flag — existing `policy.rego` runs unchanged under OPA v1.x |
 | Policy | `opa/policy.rego` — role × field matrix, VIP check, backend alias lookup |
 | Config distribution | Bundle mode — polls `http://admin-service:8888/bundle/masking_config.tar.gz` every 15–60 s |
@@ -383,7 +383,7 @@ This register must be reviewed before each major deployment and at minimum annua
 |---|---|---|---|---|
 | Kong Gateway (OSS) | 3.9.1 | Active — OSS "use latest" policy; no per-minor EOS | Rolling (upgrade to latest 3.x quarterly) | Aug 2026 |
 | Keycloak | 26.6.1 | Active — community rolling support (latest minor only) | Rolling (upgrade within 6 months of new major) | Aug 2026 |
-| OPA | v1.4.2 | Active — monthly releases, no formal EOL | Rolling (review quarterly) | Aug 2026 |
+| OPA | 1.16.1 | Active — monthly releases, no formal EOL | Rolling (review quarterly) | Aug 2026 |
 | PostgreSQL | 16 | **Supported** — active bug-fix + security | **Oct 2028** | Oct 2027 |
 | Grafana Loki | 3.7.1 | Active — 2-minor rolling support window | Rolling | Aug 2026 |
 | Grafana | 12.4.0 | Active — supported until ~May 2027 | **~May 2027** | Nov 2026 |
@@ -396,7 +396,7 @@ This register must be reviewed before each major deployment and at minimum annua
 
 | Date | Action | Previous → New |
 |---|---|---|
-| 2026-05-03 | Initial version alignment | Kong 3.5→3.9.1, Keycloak 23.0→26.6.1, OPA latest→v1.4.2, Loki 2.9.0→3.7.1, Grafana 10.3.0→12.4.0, Python 3.11→3.12 |
+| 2026-05-03 | Initial version alignment | Kong 3.5→3.9.1, Keycloak 23.0→26.6.1, OPA latest→1.16.1, Loki 2.9.0→3.7.1, Grafana 10.3.0→12.4.0, Python 3.11→3.12 |
 
 ### Vendor support policies
 

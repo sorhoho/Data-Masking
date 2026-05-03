@@ -1,4 +1,4 @@
-FROM openpolicyagent/opa:v1.4.2-rootless
+FROM openpolicyagent/opa:1.16.1
 
 COPY policy.rego      /policies/policy.rego
 COPY opa-config.yaml  /policies/opa-config.yaml

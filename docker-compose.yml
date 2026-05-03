@@ -46,7 +46,7 @@ services:
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
-    image: openpolicyagent/opa:v1.4.2
+    image: openpolicyagent/opa:1.16.1
     command: run --server --log-level info --v0-compatible
              --config-file /policies/opa-config.yaml /policies/policy.rego
     volumes:
