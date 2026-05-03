@@ -21,7 +21,7 @@ services:
 
   # ── Identity Provider ─────────────────────────────────────────────────────
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.6.1
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -30,7 +30,6 @@ services:
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: keycloak_pass
       KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: "8080"
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HTTP_ENABLED: "true"
@@ -47,7 +46,7 @@ services:
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
-    image: openpolicyagent/opa:latest
+    image: openpolicyagent/opa:v1.4.2
     command: run --server --log-level info --v0-compatible
              --config-file /policies/opa-config.yaml /policies/policy.rego
     volumes:
@@ -77,12 +76,13 @@ services:
 
   # ── Loki (log persistence) ────────────────────────────────────────────────
   loki:
-    image: grafana/loki:2.9.0
+    image: grafana/loki:3.7.1
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki-config.yaml
     volumes:
       - loki-data:/loki
+      - ./grafana/loki-config.yaml:/etc/loki/loki-config.yaml
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
       interval: 10s
@@ -92,7 +92,7 @@ services:
 
   # ── Grafana (log query + dashboards) ─────────────────────────────────────
   grafana:
-    image: grafana/grafana:10.3.0
+    image: grafana/grafana:12.4.0
     ports:
       - "3001:3000"
     environment:
@@ -162,7 +162,7 @@ services:
 
   # ── API Gateway (Kong) ────────────────────────────────────────────────────
   kong:
-    image: kong:3.5
+    image: kong:3.9.1
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /kong/kong.yml

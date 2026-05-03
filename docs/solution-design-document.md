@@ -22,12 +22,13 @@
 6. [Data Classification and PII Handling](#6-data-classification-and-pii-handling)
 7. [Authentication and Authorization Design](#7-authentication-and-authorization-design)
 8. [Audit and Observability](#8-audit-and-observability)
-9. [Non-Functional Requirements](#9-non-functional-requirements)
-10. [Architecture Decision Records](#10-architecture-decision-records)
-11. [Gap Analysis and Remediation Plan](#11-gap-analysis-and-remediation-plan)
-12. [Operational Readiness](#12-operational-readiness)
-13. [Compliance Mapping](#13-compliance-mapping)
-14. [Approval Sign-off](#14-approval-sign-off)
+9. [Software Version and End-of-Support Register](#9-software-version-and-end-of-support-register)
+10. [Non-Functional Requirements](#10-non-functional-requirements)
+11. [Architecture Decision Records](#11-architecture-decision-records)
+12. [Gap Analysis and Remediation Plan](#12-gap-analysis-and-remediation-plan)
+13. [Operational Readiness](#13-operational-readiness)
+14. [Compliance Mapping](#14-compliance-mapping)
+15. [Approval Sign-off](#15-approval-sign-off)
 
 ---
 
@@ -162,6 +163,7 @@ Client → Kong → (JWKS verify) → OPA decision → Upstream service → Mask
 
 | Attribute | Value |
 |---|---|
+| Version | 3.9.1 (EOS: OSS "use latest" policy; Enterprise 3.10 LTS EOS Mar 2028) |
 | Mode | DB-less (declarative `kong.yml`) |
 | Plugins | `cors`, `pre-function` (Lua), `post-function` (Lua) |
 | JWT verification | `resty.jwt` + `resty.openssl.pkey` — RS256, JWKS, 5-min cache |
@@ -176,7 +178,7 @@ The Kong Admin API (`:8001`) must not be externally reachable. It is currently m
 
 | Attribute | Value |
 |---|---|
-| Version | 24.x |
+| Version | 26.6.1 (community rolling support — only latest minor receives patches) |
 | Realm | `demo` — auto-imported from `keycloak/realm-config.json` |
 | Token type | RS256-signed JWT containing `realm_access.roles` |
 | Persistence | PostgreSQL (`keycloak` database) |
@@ -186,7 +188,8 @@ The Kong Admin API (`:8001`) must not be externally reachable. It is currently m
 
 | Attribute | Value |
 |---|---|
-| Version | 0.x (v0-compatible mode) |
+| Version | v1.4.2 (pinned; OPA monthly releases, no formal EOL policy) |
+| Rego compatibility | `--v0-compatible` flag — existing `policy.rego` runs unchanged under OPA v1.x |
 | Policy | `opa/policy.rego` — role × field matrix, VIP check, backend alias lookup |
 | Config distribution | Bundle mode — polls `http://admin-service:8888/bundle/masking_config.tar.gz` every 15–60 s |
 | Decision logging | `decision_logs.console: true` — every evaluation emitted as structured JSON to stdout |
@@ -371,7 +374,45 @@ log aggregator. Decision logs contain: decision_id, input, result, timestamp, pa
 
 ---
 
-## 9. Non-Functional Requirements
+## 9. Software Version and End-of-Support Register
+
+All component versions are reviewed at design time against vendor support lifecycle policies.
+This register must be reviewed before each major deployment and at minimum annually.
+
+| Component | Version | Support Status (May 2026) | EOL / EOS Date | Next Review |
+|---|---|---|---|---|
+| Kong Gateway (OSS) | 3.9.1 | Active — OSS "use latest" policy; no per-minor EOS | Rolling (upgrade to latest 3.x quarterly) | Aug 2026 |
+| Keycloak | 26.6.1 | Active — community rolling support (latest minor only) | Rolling (upgrade within 6 months of new major) | Aug 2026 |
+| OPA | v1.4.2 | Active — monthly releases, no formal EOL | Rolling (review quarterly) | Aug 2026 |
+| PostgreSQL | 16 | **Supported** — active bug-fix + security | **Oct 2028** | Oct 2027 |
+| Grafana Loki | 3.7.1 | Active — 2-minor rolling support window | Rolling | Aug 2026 |
+| Grafana | 12.4.0 | Active — supported until ~May 2027 | **~May 2027** | Nov 2026 |
+| Python | 3.12-slim | Active — bug-fix + security | **Oct 2028** | Oct 2027 |
+| Flask | 3.1.1 | Active | Follows Python lifecycle | Oct 2027 |
+| psycopg2-binary | ≥ 2.9 | Active | N/A | Oct 2027 |
+| authlib | 1.3.1 | Active | N/A | Oct 2027 |
+
+### Version history (this document)
+
+| Date | Action | Previous → New |
+|---|---|---|
+| 2026-05-03 | Initial version alignment | Kong 3.5→3.9.1, Keycloak 23.0→26.6.1, OPA latest→v1.4.2, Loki 2.9.0→3.7.1, Grafana 10.3.0→12.4.0, Python 3.11→3.12 |
+
+### Vendor support policies
+
+| Vendor | Policy summary | Reference |
+|---|---|---|
+| Kong (OSS) | Only the latest minor release is supported. No per-version EOL dates. Enterprise LTS versions (3.7, 3.9, 3.10) have 2–3 year windows. | developer.konghq.com/gateway/version-support-policy |
+| Keycloak | Community: latest minor only. Red Hat Build of Keycloak (RHBK) offers 18–36 month support per major. | keycloak.org |
+| OPA | No formal EOL policy. Monthly releases. Pin to a specific version; review quarterly. | openpolicyagent.org |
+| PostgreSQL | 5-year support from initial release. Minor-version bugfixes only. | postgresql.org/support/versioning |
+| Grafana | Latest + previous minor supported. Major versions: current + one back. | grafana.com/docs/release-life-cycle |
+| Python | 5-year lifecycle per minor: 1.5 yr bug-fix, then 3.5 yr security-only. | devguide.python.org/versions |
+
+---
+
+## 10. Non-Functional Requirements
+
 
 | NFR | Requirement | Current State | Gap |
 |---|---|---|---|
@@ -387,7 +428,7 @@ log aggregator. Decision logs contain: decision_id, input, result, timestamp, pa
 
 ---
 
-## 10. Architecture Decision Records
+## 11. Architecture Decision Records
 
 ### ADR-001: JWT Verification at Gateway Layer
 
@@ -479,7 +520,7 @@ any application code.
 
 ---
 
-## 11. Gap Analysis and Remediation Plan
+## 12. Gap Analysis and Remediation Plan
 
 ### P1 — Blocking (must resolve before production go-live)
 
@@ -513,7 +554,7 @@ any application code.
 
 ---
 
-## 12. Operational Readiness
+## 13. Operational Readiness
 
 ### 12.1 Runbook Summary
 
@@ -551,7 +592,7 @@ grafana (auto-provisions on start)
 
 ---
 
-## 13. Compliance Mapping
+## 14. Compliance Mapping
 
 | Requirement | How addressed |
 |---|---|
@@ -564,7 +605,7 @@ grafana (auto-provisions on start)
 
 ---
 
-## 14. Approval Sign-off
+## 15. Approval Sign-off
 
 | Role | Name | Decision | Date |
 |---|---|---|---|

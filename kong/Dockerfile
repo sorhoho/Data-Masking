@@ -1,4 +1,4 @@
-FROM kong:3.5
+FROM kong:3.9.1
 
 # Kong runs as non-root; switch to root only to copy files and fix ownership
 USER root
