@@ -142,31 +142,8 @@ plugins:
               return json_exit(401, "Malformed JWT")
           end
 
-          -- Match signing key by kid header (fall back to first sig key)
-          local kid     = jwt_obj.header and jwt_obj.header.kid
-          local pem_key = nil
-          for _, jwk in ipairs(jwks.keys or {}) do
-              if jwk.use == "sig" and (not kid or jwk.kid == kid) then
-                  local pkey, pk_err = pkey_lib.new(jwk, "JWK")
-                  if pkey then
-                      pem_key = pkey:tostring("public", "PEM")
-                      break
-                  end
-                  kong.log.warn("JWK→PEM failed: ", pk_err)
-              end
-          end
-
-          if not pem_key then
-              -- Rotate cache — Keycloak may have rolled keys
-              kong.cache:invalidate("jwks_v1")
-              kong.log.err("No matching JWKS key for kid: ", kid or "(none)")
-              kong.ctx.shared.deny_reason = "jwks_key_not_found"
-              return json_exit(401, "Token signing key not found — please re-authenticate")
-          end
-
-          -- Realm check: iss must contain /realms/<KEYCLOAK_REALM> regardless of host.
-          -- This guards against cross-realm token confusion without requiring the
-          -- caller to know the exact external hostname of Keycloak.
+          -- Realm check: iss must contain /realms/<KEYCLOAK_REALM> regardless of
+          -- hostname. Fails fast on cross-realm tokens before any key lookup.
           local token_iss = (jwt_obj.payload or {}).iss or ""
           if not token_iss:find("/realms/" .. KEYCLOAK_REALM, 1, true) then
               kong.log.warn("JWT iss realm mismatch: ", token_iss)
@@ -174,22 +151,94 @@ plugins:
               return json_exit(401, "Token issued for wrong realm")
           end
 
-          -- Cryptographic verification: RS256 signature + iss + exp/nbf.
-          -- If KEYCLOAK_ISSUER env var is set, enforce it strictly (production).
-          -- Otherwise use the token's own iss — valid because it is part of the
-          -- signed payload and the realm check above already validated the path.
-          local expected_iss = (KEYCLOAK_ISSUER ~= "") and KEYCLOAK_ISSUER or token_iss
-          local verified = jwt_lib:verify_jwt_obj(pem_key, jwt_obj, {
-              valid_issuers         = { expected_iss },
-              lifetime_grace_period = 10,
-          })
-          if not verified.verified then
-              kong.log.warn("JWT verification failed: ", verified.reason)
-              kong.ctx.shared.deny_reason = "jwt_invalid_signature"
-              return json_exit(401, "Invalid or expired token: " .. (verified.reason or "unknown"))
+          -- Match signing key by kid (fall back to first sig key)
+          local kid          = jwt_obj.header and jwt_obj.header.kid
+          local signing_pkey = nil
+          for _, jwk in ipairs(jwks.keys or {}) do
+              if jwk.use == "sig" and (not kid or jwk.kid == kid) then
+                  local pkey, pk_err = pkey_lib.new(jwk, "JWK")
+                  if pkey then
+                      signing_pkey = pkey
+                      break
+                  end
+                  kong.log.warn("JWK→pkey failed: ", pk_err)
+              end
           end
 
-          local claims = jwt_obj.payload
+          if not signing_pkey then
+              kong.cache:invalidate("jwks_v1")
+              kong.log.err("No matching JWKS key for kid: ", kid or "(none)")
+              kong.ctx.shared.deny_reason = "jwks_key_not_found"
+              return json_exit(401, "Token signing key not found — please re-authenticate")
+          end
+
+          -- Verify signature directly via resty.openssl.pkey:verify.
+          -- We avoid lua-resty-jwt:verify_jwt_obj because its internal RSA path
+          -- (via lua-resty-rsa) has known compatibility issues with the OpenSSL
+          -- 3.x library bundled in Kong 3.9+, producing false "Verification failed"
+          -- errors even for valid tokens signed with Keycloak's RS256 key.
+          local alg = (jwt_obj.header or {}).alg or "RS256"
+          local digest_map = {
+              RS256="SHA256", RS384="SHA384", RS512="SHA512",
+              PS256="SHA256", PS384="SHA384", PS512="SHA512",
+          }
+          local digest_name = digest_map[alg]
+          if not digest_name then
+              kong.log.warn("Unsupported JWT alg: ", alg)
+              kong.ctx.shared.deny_reason = "unsupported_alg"
+              return json_exit(401, "Unsupported token algorithm: " .. alg)
+          end
+
+          -- Split token → signing_input (header.payload) + raw signature bytes
+          local dot1 = token:find(".", 1, true)
+          local dot2 = dot1 and token:find(".", dot1 + 1, true)
+          if not dot1 or not dot2 then
+              kong.ctx.shared.deny_reason = "malformed_jwt"
+              return json_exit(401, "Malformed JWT structure")
+          end
+          local signing_input = token:sub(1, dot2 - 1)
+          local sig_b64url    = token:sub(dot2 + 1)
+          -- base64url → standard base64 → binary
+          local sig_b64 = sig_b64url:gsub("%-", "+"):gsub("_", "/")
+          local rem = #sig_b64 % 4
+          if rem > 0 then sig_b64 = sig_b64 .. string.rep("=", 4 - rem) end
+          local sig_bin = ngx.decode_base64(sig_b64)
+          if not sig_bin then
+              kong.ctx.shared.deny_reason = "malformed_jwt"
+              return json_exit(401, "Invalid token signature encoding")
+          end
+
+          local sig_ok, sig_err
+          if alg:sub(1, 2) == "PS" then
+              -- PS256/PS384/PS512: RSA-PSS requires explicit padding constant
+              local ok, consts = pcall(require, "resty.openssl.constants")
+              local pss_pad = ok and consts.PADDINGS and consts.PADDINGS.RSA_PKCS1_PSS_PADDING
+              sig_ok, sig_err = signing_pkey:verify(sig_bin, signing_input, digest_name, pss_pad)
+          else
+              -- RS256/RS384/RS512: default PKCS1v15 padding
+              sig_ok, sig_err = signing_pkey:verify(sig_bin, signing_input, digest_name)
+          end
+
+          if not sig_ok then
+              kong.log.warn("JWT sig invalid: alg=", alg,
+                            " kid=", kid or "none", " err=", sig_err or "nil")
+              kong.ctx.shared.deny_reason = "jwt_invalid_signature"
+              return json_exit(401, "Invalid token signature")
+          end
+
+          -- Claims validation: exp + nbf with 10 s grace period
+          local now     = ngx.now()
+          local payload = jwt_obj.payload or {}
+          if payload.exp and payload.exp + 10 < now then
+              kong.ctx.shared.deny_reason = "jwt_expired"
+              return json_exit(401, "Token has expired")
+          end
+          if payload.nbf and payload.nbf - 10 > now then
+              kong.ctx.shared.deny_reason = "jwt_not_yet_valid"
+              return json_exit(401, "Token not yet valid")
+          end
+
+          local claims = payload
 
           -- ── 3. Pick highest-priority role from realm_access.roles ─────────
           local realm_roles  = (claims.realm_access or {}).roles or {}
