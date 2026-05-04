@@ -97,7 +97,9 @@ Every request through Kong goes through a fixed pipeline of three phases.
 ### Phase 1 — Pre-function (access control, `kong.yml` → `pre-function`)
 
 1. **Extract Bearer token** from `Authorization` header — 401 if missing.
-2. **Verify JWT RS256 signature** — fetch JWKS from `http://keycloak:8080/realms/demo/protocol/openid-connect/certs`, cache the key set per Kong worker for 5 minutes (keyed `"jwks_v1"` in `kong.cache`). Match the token's `kid` header against cached keys; if the `kid` is unknown, invalidate the cache and re-fetch once (handles key rotation). Convert the matching JWK to PEM via `resty.openssl.pkey`, then call `resty.jwt:verify_jwt_obj` with `valid_issuers` and a 10-second `lifetime_grace_period`. Reject with 401 on any signature or claims failure.
+2. **Verify JWT RS256 signature** — fetch JWKS from the internal Keycloak URL (`KEYCLOAK_INTERNAL_URL/realms/KEYCLOAK_REALM/protocol/openid-connect/certs`; defaults to `http://keycloak:8080/realms/demo/...`), cache per Kong worker for 5 minutes. Match the token's `kid`; on unknown `kid` invalidate cache and re-fetch once (key rotation). Convert the matching JWK to PEM via `resty.openssl.pkey`, then:
+   - **Realm check**: verify `iss` contains `/realms/demo` — guards against cross-realm token confusion regardless of hostname.
+   - **Signature check**: call `resty.jwt:verify_jwt_obj` with `lifetime_grace_period=10`. If `KEYCLOAK_ISSUER` env var is set, enforce it strictly; otherwise accept the token's own `iss` (safe — it is inside the signed payload). This lets the stack work on localhost, Cloud Shell, or any reverse-proxy environment without config changes.
 3. **Pick highest-priority role** from `realm_access.roles` (priority: admin > supervisor > vip_agent > agent/partner).
 4. **Detect backend** from path prefix (`/api/billing/*` → `"billing"`, everything else → `"crm"`).
 5. **Resolve MSISDN → customer_id** (for MSISDN-based routes) by calling CRM's internal `/api/resolve` endpoint. This gives OPA a stable customer_id for the VIP check.

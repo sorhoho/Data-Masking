@@ -99,9 +99,20 @@ plugins:
           end
 
           -- ── 2. Fetch JWKS (cached) + verify RS256 signature ──────────────
-          local KEYCLOAK_ISSUER = "http://keycloak:8080/realms/demo"
-          local JWKS_URL        = KEYCLOAK_ISSUER .. "/protocol/openid-connect/certs"
-          local JWKS_TTL        = 300  -- 5-minute cache; Keycloak rotates keys rarely
+          -- KEYCLOAK_INTERNAL_URL: always the internal Docker URL — used only for
+          --   the JWKS HTTP fetch (container-to-container, never changes).
+          -- KEYCLOAK_ISSUER: optional — if set, validated strictly against the
+          --   token's iss claim. If unset, the token's own iss is accepted
+          --   (safe: iss is part of the RS256-signed payload; realm path check
+          --   below prevents cross-realm confusion regardless of hostname).
+          -- This separation makes the stack work on localhost, Cloud Shell, or
+          -- any reverse-proxy environment without per-deployment changes.
+          local KEYCLOAK_INTERNAL_URL = os.getenv("KEYCLOAK_INTERNAL_URL") or "http://keycloak:8080"
+          local KEYCLOAK_REALM        = os.getenv("KEYCLOAK_REALM")        or "demo"
+          local KEYCLOAK_ISSUER       = os.getenv("KEYCLOAK_ISSUER")       or ""
+          local JWKS_URL = KEYCLOAK_INTERNAL_URL .. "/realms/" .. KEYCLOAK_REALM
+                        .. "/protocol/openid-connect/certs"
+          local JWKS_TTL = 300  -- 5-minute cache; Keycloak rotates keys rarely
 
           local jwt_lib  = require("resty.jwt")
           local pkey_lib = require("resty.openssl.pkey")
@@ -153,9 +164,23 @@ plugins:
               return json_exit(401, "Token signing key not found — please re-authenticate")
           end
 
-          -- Cryptographic verification: RS256 signature + iss + exp/nbf
+          -- Realm check: iss must contain /realms/<KEYCLOAK_REALM> regardless of host.
+          -- This guards against cross-realm token confusion without requiring the
+          -- caller to know the exact external hostname of Keycloak.
+          local token_iss = (jwt_obj.payload or {}).iss or ""
+          if not token_iss:find("/realms/" .. KEYCLOAK_REALM, 1, true) then
+              kong.log.warn("JWT iss realm mismatch: ", token_iss)
+              kong.ctx.shared.deny_reason = "wrong_realm"
+              return json_exit(401, "Token issued for wrong realm")
+          end
+
+          -- Cryptographic verification: RS256 signature + iss + exp/nbf.
+          -- If KEYCLOAK_ISSUER env var is set, enforce it strictly (production).
+          -- Otherwise use the token's own iss — valid because it is part of the
+          -- signed payload and the realm check above already validated the path.
+          local expected_iss = (KEYCLOAK_ISSUER ~= "") and KEYCLOAK_ISSUER or token_iss
           local verified = jwt_lib:verify_jwt_obj(pem_key, jwt_obj, {
-              valid_issuers         = { KEYCLOAK_ISSUER },
+              valid_issuers         = { expected_iss },
               lifetime_grace_period = 10,
           })
           if not verified.verified then

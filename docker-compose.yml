@@ -176,6 +176,12 @@ services:
       KONG_STATUS_LISTEN: "0.0.0.0:8100"
       KONG_UNTRUSTED_LUA: "on"
       LOG_DASHBOARD_URL: http://log-dashboard:9000/log
+      KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
+      KEYCLOAK_REALM: "demo"
+      # KEYCLOAK_ISSUER: unset — Kong accepts any iss whose realm path matches
+      # KEYCLOAK_REALM. Set this to the exact issuer URL to enforce strict
+      # validation (recommended in production, required when Keycloak sits behind
+      # a reverse proxy with a fixed hostname).
     volumes:
       - ./kong:/kong
     ports:
