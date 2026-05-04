@@ -156,12 +156,40 @@ plugins:
           local signing_pkey = nil
           for _, jwk in ipairs(jwks.keys or {}) do
               if jwk.use == "sig" and (not kid or jwk.kid == kid) then
-                  local pkey, pk_err = pkey_lib.new(jwk, "JWK")
-                  if pkey then
-                      signing_pkey = pkey
-                      break
+                  -- Primary: load from x5c certificate (DER).
+                  -- Keycloak always includes x5c in JWKS. Certificate parsing is
+                  -- unambiguous and the extracted pkey carries no algorithm
+                  -- constraints, avoiding the OpenSSL 3.x JWK-alg conflict that
+                  -- causes RSA_public_decrypt to fail even on valid tokens.
+                  if jwk.x5c and type(jwk.x5c) == "table" and jwk.x5c[1] then
+                      local cert_der = ngx.decode_base64(jwk.x5c[1])
+                      if cert_der then
+                          local x509_lib = require("resty.openssl.x509")
+                          local cert, cerr = x509_lib.new(cert_der, "DER")
+                          if cert then
+                              signing_pkey = cert:get_pubkey()
+                          else
+                              kong.log.warn("x509 parse failed: ", cerr)
+                          end
+                      end
                   end
-                  kong.log.warn("JWK→pkey failed: ", pk_err)
+                  -- Fallback: minimal JWK JSON string (kty/n/e only, no alg field).
+                  -- Omitting "alg" prevents OpenSSL from locking the key to a
+                  -- specific algorithm context that conflicts with pkey:verify.
+                  if not signing_pkey then
+                      local jwk_json = cjson.encode({
+                          kty = jwk.kty or "RSA",
+                          n   = jwk.n,
+                          e   = jwk.e,
+                      })
+                      local pkey, pk_err = pkey_lib.new(jwk_json, "JWK")
+                      if pkey then
+                          signing_pkey = pkey
+                      else
+                          kong.log.warn("JWK→pkey failed: ", pk_err)
+                      end
+                  end
+                  if signing_pkey then break end
               end
           end
 
