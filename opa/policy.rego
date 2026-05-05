@@ -1,10 +1,6 @@
 package data_masking
 
 # ── Config populated at runtime by admin-service ──────────────────────────────
-# Admin service PUTs to OPA's /v1/data/masking_config on startup and on every
-# change, so these rules always reflect the current admin configuration.
-# The else clauses are safe fallbacks in case data hasn't been pushed yet.
-
 vip_customers = c {
     c := data.masking_config.vip_customers
 } else = {}
@@ -22,16 +18,13 @@ role_masked_fields = f {
 }
 
 # ── Backend field registry ───────────────────────────────────────────────────
-# Returns the field map for input.backend so Kong can mask alias field names.
-# Shape: { backend_field: { canonical, classification }, ... }
-# Kong uses this to mask "mobilenum" with the same function as "msisdn", etc.
 default backend_fields = {}
 
 backend_fields = f {
     f := data.masking_config.backends[input.backend]
 }
 
-# ── VIP flag (returned to Kong for X-Access-Reference enforcement) ────────────
+# ── VIP flag ─────────────────────────────────────────────────────────────────
 default is_vip = false
 
 is_vip = true {
@@ -41,7 +34,6 @@ is_vip = true {
 # ── Access decision ───────────────────────────────────────────────────────────
 default allow = false
 
-# Regular roles: denied for VIP customers
 allow {
     input.role == "agent"
     not vip_customers[input.customer_id]
@@ -52,7 +44,6 @@ allow {
     not vip_customers[input.customer_id]
 }
 
-# Privileged roles: allowed for all customers (VIP header enforcement done in Kong)
 allow {
     input.role == "vip_agent"
 }
@@ -61,23 +52,30 @@ allow {
     input.role == "admin"
 }
 
-# Partner (machine-to-machine): full L1+L2 masking, no VIP access, no unmask
 allow {
     input.role == "partner"
     not vip_customers[input.customer_id]
     not startswith(input.path, "/api/unmask")
 }
 
-# ── Masked fields (empty = no masking) ───────────────────────────────────────
-default masked_fields = []
-
-# Unmask endpoint: caller explicitly requested full data
+# ── Masked fields ─────────────────────────────────────────────────────────────
+# else-chain avoids multiple complete-rule definitions for the same name,
+# which OPA v1.x flags even in --v0-compatible mode.
 masked_fields = [] {
     startswith(input.path, "/api/unmask")
-}
-
-# Regular endpoint: role-based masking from admin-configured rules
-masked_fields = fields {
-    not startswith(input.path, "/api/unmask")
+} else = fields {
     fields := role_masked_fields[input.role]
+} else = []
+
+# ── Decision entry point ──────────────────────────────────────────────────────
+# OPA v1.x does not include `default`-only rule values in the package
+# document query (/v1/data/data_masking).  An explicit complete rule
+# that references the sub-rules is always emitted — even when the
+# sub-rules resolve through their defaults — giving Kong a guaranteed
+# non-undefined result at /v1/data/data_masking/decision.
+decision = {
+    "allow":         allow,
+    "is_vip":        is_vip,
+    "masked_fields": masked_fields,
+    "backend_fields": backend_fields,
 }

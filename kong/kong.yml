@@ -72,7 +72,7 @@ plugins:
           local http  = require("resty.http")
           local cjson = require("cjson.safe")
 
-          local OPA_URL          = os.getenv("OPA_URL")          or "http://opa:8181/v1/data/data_masking"
+          local OPA_URL          = os.getenv("OPA_URL")          or "http://opa:8181/v1/data/data_masking/decision"
           local LOG_URL          = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
           local CRM_INTERNAL_URL = os.getenv("CRM_INTERNAL_URL") or "http://crm-mock:5000"
           local ROLE_PRIORITY    = { admin = 4, supervisor = 3, vip_agent = 2, agent = 1, partner = 1 }
