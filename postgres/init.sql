@@ -3,3 +3,7 @@
 CREATE DATABASE admindb;
 CREATE USER adminuser WITH PASSWORD 'admin_pass';
 GRANT ALL PRIVILEGES ON DATABASE admindb TO adminuser;
+-- PostgreSQL 15+ restricts CREATE in the public schema by default.
+-- Connect to admindb and grant schema-level privileges explicitly.
+\connect admindb
+GRANT ALL ON SCHEMA public TO adminuser;

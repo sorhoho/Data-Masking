@@ -46,11 +46,7 @@ services:
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
-    image: openpolicyagent/opa:1.16.1
-    command: run --server --log-level info --v0-compatible
-             --config-file /policies/opa-config.yaml /policies/policy.rego
-    volumes:
-      - ./opa:/policies
+    build: ./opa
     ports:
       - "8181:8181"
     depends_on:
