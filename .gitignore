@@ -9,3 +9,6 @@ build/
 .env
 .venv/
 venv/
+
+# graphify generated output
+graphify-out/
