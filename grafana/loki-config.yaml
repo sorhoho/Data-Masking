@@ -1,12 +1,12 @@
-# Loki 3.x single-binary config — filesystem storage, no auth.
-# Uses TSDB index (BoltDB was removed in 3.0) and schema v13.
-# allow_structured_metadata disabled for simplicity (v13 default is on).
+# Loki 3.x single-binary — filesystem/TSDB, no auth.
+# query_range cache and ruler sections omitted; they are not needed for
+# this demo and can cause startup hangs in some 3.x patch releases.
 
 auth_enabled: false
 
 server:
   http_listen_port: 3100
-  grpc_listen_port: 9096
+  log_level: warn
 
 common:
   instance_addr: 127.0.0.1
@@ -33,12 +33,5 @@ schema_config:
 limits_config:
   allow_structured_metadata: false
 
-query_range:
-  results_cache:
-    cache:
-      embedded_cache:
-        enabled:     true
-        max_size_mb: 100
-
-ruler:
-  alertmanager_url: http://localhost:9093
+analytics:
+  reporting_enabled: false

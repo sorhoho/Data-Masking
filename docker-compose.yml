@@ -83,8 +83,8 @@ services:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 12
+      start_period: 60s
 
   # ── Grafana (log query + dashboards) ─────────────────────────────────────
   grafana:
