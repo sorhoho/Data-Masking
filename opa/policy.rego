@@ -1,13 +1,18 @@
 package data_masking
 
-# ── Config populated at runtime by admin-service ──────────────────────────────
-vip_customers = c {
-    c := data.masking_config.vip_customers
-} else = {}
+import rego.v1
 
-role_masked_fields = f {
-    f := data.masking_config.role_masked_fields
-} else = {
+# ── Bundle data (safe fallbacks when bundle not yet loaded) ───────────────────
+
+vip_customers := data.masking_config.vip_customers if {
+    data.masking_config.vip_customers
+}
+default vip_customers := {}
+
+role_masked_fields := data.masking_config.role_masked_fields if {
+    data.masking_config.role_masked_fields
+}
+default role_masked_fields := {
     "agent":      ["name", "msisdn", "email", "national_id", "address",
                    "last_call_duration", "data_roaming_gb", "last_location"],
     "supervisor": ["msisdn", "national_id"],
@@ -17,63 +22,53 @@ role_masked_fields = f {
                    "last_call_duration", "data_roaming_gb", "last_location"]
 }
 
-# ── Backend field registry ───────────────────────────────────────────────────
-default backend_fields = {}
-
-backend_fields = f {
+backend_fields := f if {
     f := data.masking_config.backends[input.backend]
 }
+default backend_fields := {}
 
-# ── VIP flag ─────────────────────────────────────────────────────────────────
-default is_vip = false
+# ── VIP flag ──────────────────────────────────────────────────────────────────
 
-is_vip = true {
-    vip_customers[input.customer_id]
-}
+is_vip := true if { vip_customers[input.customer_id] }
+default is_vip := false
 
 # ── Access decision ───────────────────────────────────────────────────────────
-default allow = false
 
-allow {
+default allow := false
+
+allow if {
     input.role == "agent"
     not vip_customers[input.customer_id]
 }
-
-allow {
+allow if {
     input.role == "supervisor"
     not vip_customers[input.customer_id]
 }
-
-allow {
-    input.role == "vip_agent"
-}
-
-allow {
-    input.role == "admin"
-}
-
-allow {
+allow if { input.role == "vip_agent" }
+allow if { input.role == "admin" }
+allow if {
     input.role == "partner"
     not vip_customers[input.customer_id]
     not startswith(input.path, "/api/unmask")
 }
 
 # ── Masked fields ─────────────────────────────────────────────────────────────
-# else-chain avoids multiple complete-rule definitions for the same name,
-# which OPA v1.x flags even in --v0-compatible mode.
-masked_fields = [] {
+# else-chain: only one branch fires per request, avoids conflicting
+# complete-rule definitions that OPA v1 rejects at compile time.
+
+masked_fields := [] if {
     startswith(input.path, "/api/unmask")
-} else = fields {
+} else := fields if {
     fields := role_masked_fields[input.role]
-} else = []
+} else := []
 
 # ── Decision entry point ──────────────────────────────────────────────────────
-# OPA v1.x does not include `default`-only rule values in the package
-# document query (/v1/data/data_masking).  An explicit complete rule
-# that references the sub-rules is always emitted — even when the
-# sub-rules resolve through their defaults — giving Kong a guaranteed
-# non-undefined result at /v1/data/data_masking/decision.
-decision = {
+# A concrete complete rule (not a default) that Kong queries at
+# /v1/data/data_masking/decision.  All sub-rules have default values so
+# this object is always fully defined — OPA v1 emits it in the result
+# regardless of which sub-rules matched.
+
+decision := {
     "allow":         allow,
     "is_vip":        is_vip,
     "masked_fields": masked_fields,
