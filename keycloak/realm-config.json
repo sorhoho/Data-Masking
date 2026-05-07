@@ -127,6 +127,90 @@
       {
         "name": "partner",
         "description": "External partner (M2M) \u2013 full L1+L2 masking, no VIP access, no unmask"
+      },
+      {
+        "name": "care_l1",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "care_l2",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "care_supervisor",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "noc_operator",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "field_technician",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "billing_agent",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "fraud_analyst",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "roaming_ops",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "compliance_officer",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "audit_viewer",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "vip_care",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "b2b_partner",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "mvno_partner",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
+      },
+      {
+        "name": "data_admin",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "demo"
       }
     ]
   },
@@ -211,6 +295,258 @@
       "serviceAccountClientId": "partner-client",
       "realmRoles": [
         "partner"
+      ]
+    },
+    {
+      "username": "care1",
+      "email": "care1@demo.local",
+      "firstName": "Carol",
+      "lastName": "L1",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "care1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "care_l1"
+      ]
+    },
+    {
+      "username": "care2",
+      "email": "care2@demo.local",
+      "firstName": "Carlos",
+      "lastName": "L2",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "care2pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "care_l2"
+      ]
+    },
+    {
+      "username": "caresup1",
+      "email": "caresup1@demo.local",
+      "firstName": "Sophie",
+      "lastName": "Supervisor",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "caresup1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "care_supervisor"
+      ]
+    },
+    {
+      "username": "noc1",
+      "email": "noc1@demo.local",
+      "firstName": "Nick",
+      "lastName": "Operator",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "noc1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "noc_operator"
+      ]
+    },
+    {
+      "username": "fieldtech1",
+      "email": "fieldtech1@demo.local",
+      "firstName": "Fred",
+      "lastName": "Tech",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fieldtech1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "field_technician"
+      ]
+    },
+    {
+      "username": "billing1",
+      "email": "billing1@demo.local",
+      "firstName": "Bella",
+      "lastName": "Agent",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "billing1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "billing_agent"
+      ]
+    },
+    {
+      "username": "fraud1",
+      "email": "fraud1@demo.local",
+      "firstName": "Frank",
+      "lastName": "Analyst",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "fraud1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "fraud_analyst"
+      ]
+    },
+    {
+      "username": "roaming1",
+      "email": "roaming1@demo.local",
+      "firstName": "Rosa",
+      "lastName": "Ops",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "roaming1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "roaming_ops"
+      ]
+    },
+    {
+      "username": "compliance1",
+      "email": "compliance1@demo.local",
+      "firstName": "Clara",
+      "lastName": "Officer",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "compliance1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "compliance_officer"
+      ]
+    },
+    {
+      "username": "auditor1",
+      "email": "auditor1@demo.local",
+      "firstName": "Audrey",
+      "lastName": "Viewer",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "auditor1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "audit_viewer"
+      ]
+    },
+    {
+      "username": "vipcarer1",
+      "email": "vipcarer1@demo.local",
+      "firstName": "Victor",
+      "lastName": "VIP",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "vipcarer1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "vip_care"
+      ]
+    },
+    {
+      "username": "b2b1",
+      "email": "b2b1@demo.local",
+      "firstName": "Boris",
+      "lastName": "B2B",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "b2b1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "b2b_partner"
+      ]
+    },
+    {
+      "username": "mvno1",
+      "email": "mvno1@demo.local",
+      "firstName": "Mia",
+      "lastName": "MVNO",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "mvno1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "mvno_partner"
+      ]
+    },
+    {
+      "username": "dataadmin1",
+      "email": "dataadmin1@demo.local",
+      "firstName": "Diana",
+      "lastName": "Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dataadmin1pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "data_admin"
       ]
     }
   ]

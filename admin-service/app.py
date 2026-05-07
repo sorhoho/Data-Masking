@@ -32,19 +32,75 @@ FIELDS = [
     ("data_roaming_gb",    "L2"),
     ("last_location",      "L2"),
 ]
-ROLES = ["agent", "supervisor", "vip_agent", "admin", "partner"]
+ROLES = [
+    # Legacy
+    "agent", "supervisor", "vip_agent", "admin", "partner",
+    # Care Operations
+    "care_l1", "care_l2", "care_supervisor",
+    # Technical Operations
+    "noc_operator", "field_technician", "roaming_ops",
+    # Business Operations
+    "billing_agent", "fraud_analyst", "compliance_officer",
+    # Audit
+    "audit_viewer",
+    # VIP
+    "vip_care",
+    # External Partners
+    "b2b_partner", "mvno_partner",
+    # Administration
+    "data_admin",
+]
 
 _DEFAULT_MASKS = [
+    # ── Legacy roles ──────────────────────────────────────────────────────────
     ("agent", "name"), ("agent", "msisdn"), ("agent", "email"),
     ("agent", "national_id"), ("agent", "address"),
     ("agent", "last_call_duration"), ("agent", "data_roaming_gb"),
     ("agent", "last_location"),
     ("supervisor", "msisdn"), ("supervisor", "national_id"),
-    # partner: full L1+L2 masking (machine-to-machine external access)
     ("partner", "name"), ("partner", "msisdn"), ("partner", "email"),
     ("partner", "national_id"), ("partner", "address"),
     ("partner", "last_call_duration"), ("partner", "data_roaming_gb"),
     ("partner", "last_location"),
+    # ── Care L1: name visible, everything else masked ─────────────────────────
+    ("care_l1", "msisdn"), ("care_l1", "email"), ("care_l1", "national_id"),
+    ("care_l1", "address"), ("care_l1", "last_call_duration"),
+    ("care_l1", "data_roaming_gb"), ("care_l1", "last_location"),
+    # ── Care L2: contact visible, PII/L2 masked ───────────────────────────────
+    ("care_l2", "national_id"), ("care_l2", "address"),
+    ("care_l2", "last_call_duration"), ("care_l2", "data_roaming_gb"),
+    ("care_l2", "last_location"),
+    # ── Care Supervisor: national_id and location masked ──────────────────────
+    ("care_supervisor", "national_id"), ("care_supervisor", "last_location"),
+    # ── NOC: network data visible, identity masked ────────────────────────────
+    ("noc_operator", "name"), ("noc_operator", "email"),
+    ("noc_operator", "national_id"), ("noc_operator", "address"),
+    ("noc_operator", "last_call_duration"),
+    # ── Field Technician: name/MSISDN/address/location visible ───────────────
+    ("field_technician", "email"), ("field_technician", "national_id"),
+    ("field_technician", "last_call_duration"), ("field_technician", "data_roaming_gb"),
+    # ── Roaming Ops: MSISDN + roaming visible ────────────────────────────────
+    ("roaming_ops", "name"), ("roaming_ops", "email"),
+    ("roaming_ops", "national_id"), ("roaming_ops", "address"),
+    ("roaming_ops", "last_call_duration"),
+    # ── Billing Agent: charges + name/MSISDN visible ─────────────────────────
+    ("billing_agent", "email"), ("billing_agent", "national_id"),
+    ("billing_agent", "address"), ("billing_agent", "last_location"),
+    # ── Audit Viewer: all masked ──────────────────────────────────────────────
+    ("audit_viewer", "name"), ("audit_viewer", "msisdn"), ("audit_viewer", "email"),
+    ("audit_viewer", "national_id"), ("audit_viewer", "address"),
+    ("audit_viewer", "last_call_duration"), ("audit_viewer", "data_roaming_gb"),
+    ("audit_viewer", "last_location"),
+    # ── B2B Partner: name visible, all else masked ────────────────────────────
+    ("b2b_partner", "msisdn"), ("b2b_partner", "email"),
+    ("b2b_partner", "national_id"), ("b2b_partner", "address"),
+    ("b2b_partner", "last_call_duration"), ("b2b_partner", "data_roaming_gb"),
+    ("b2b_partner", "last_location"),
+    # ── MVNO Partner: MSISDN + roaming visible ────────────────────────────────
+    ("mvno_partner", "name"), ("mvno_partner", "email"),
+    ("mvno_partner", "national_id"), ("mvno_partner", "address"),
+    ("mvno_partner", "last_call_duration"), ("mvno_partner", "last_location"),
+    # fraud_analyst, compliance_officer, vip_care, data_admin: nothing masked
 ]
 _DEFAULT_VIPS = [
     ("C001", "Initial VIP – seeded on first run"),

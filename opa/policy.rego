@@ -13,13 +13,59 @@ role_masked_fields := data.masking_config.role_masked_fields if {
     data.masking_config.role_masked_fields
 }
 default role_masked_fields := {
+    # ── Legacy roles ──────────────────────────────────────────────────────────
     "agent":      ["name", "msisdn", "email", "national_id", "address",
                    "last_call_duration", "data_roaming_gb", "last_location"],
     "supervisor": ["msisdn", "national_id"],
     "vip_agent":  [],
     "admin":      [],
     "partner":    ["name", "msisdn", "email", "national_id", "address",
-                   "last_call_duration", "data_roaming_gb", "last_location"]
+                   "last_call_duration", "data_roaming_gb", "last_location"],
+
+    # ── Care Operations ───────────────────────────────────────────────────────
+    # L1: first-line triage — name visible, everything else masked
+    "care_l1":         ["msisdn", "email", "national_id", "address",
+                        "last_call_duration", "data_roaming_gb", "last_location"],
+    # L2: callbacks and escalations — contact details unmasked, PII still hidden
+    "care_l2":         ["national_id", "address",
+                        "last_call_duration", "data_roaming_gb", "last_location"],
+    # Supervisor: full care context for escalation; national_id and location masked
+    "care_supervisor": ["national_id", "last_location"],
+
+    # ── Technical Operations ──────────────────────────────────────────────────
+    # NOC: network-focused — MSISDN, roaming, location visible; no identity PII
+    "noc_operator":    ["name", "email", "national_id", "address", "last_call_duration"],
+    # Field tech: needs name, MSISDN, address and location for site visits
+    "field_technician":["email", "national_id", "last_call_duration", "data_roaming_gb"],
+    # Roaming ops: MSISDN + roaming data; personal identity not needed
+    "roaming_ops":     ["name", "email", "national_id", "address", "last_call_duration"],
+
+    # ── Business Operations ───────────────────────────────────────────────────
+    # Billing: sees charges + name/MSISDN; no address, email, national_id
+    "billing_agent":   ["email", "national_id", "address", "last_location"],
+    # Fraud analyst: full unmasked — investigation requires complete picture
+    "fraud_analyst":   [],
+    # Compliance: full access for regulatory audit; all events logged
+    "compliance_officer": [],
+
+    # ── Audit ─────────────────────────────────────────────────────────────────
+    # Audit viewer: schema/metadata access only — never sees raw PII
+    "audit_viewer":    ["name", "msisdn", "email", "national_id", "address",
+                        "last_call_duration", "data_roaming_gb", "last_location"],
+
+    # ── VIP & Premium ─────────────────────────────────────────────────────────
+    "vip_care":        [],
+
+    # ── External Partners ─────────────────────────────────────────────────────
+    # B2B partner: name visible for business context; all contact/PII masked
+    "b2b_partner":     ["msisdn", "email", "national_id", "address",
+                        "last_call_duration", "data_roaming_gb", "last_location"],
+    # MVNO partner: MSISDN + roaming for subscriber management
+    "mvno_partner":    ["name", "email", "national_id", "address",
+                        "last_call_duration", "last_location"],
+
+    # ── Administration ────────────────────────────────────────────────────────
+    "data_admin":      [],
 }
 
 backend_fields := f if {
@@ -32,29 +78,48 @@ default backend_fields := {}
 is_vip := true if { vip_customers[input.customer_id] }
 default is_vip := false
 
+# ── Role classification sets ──────────────────────────────────────────────────
+
+# Standard roles: serve non-VIP customers only
+standard_roles := {
+    "agent", "supervisor",
+    "care_l1", "care_l2", "care_supervisor",
+    "noc_operator", "field_technician", "roaming_ops",
+    "billing_agent", "audit_viewer",
+}
+
+# Privileged roles: can serve any customer including VIP
+privileged_roles := {
+    "vip_agent", "admin",
+    "fraud_analyst", "compliance_officer", "vip_care", "data_admin",
+}
+
+# External partner roles: non-VIP only, blocked from unmask endpoints
+partner_roles := {
+    "partner",
+    "b2b_partner", "mvno_partner",
+}
+
 # ── Access decision ───────────────────────────────────────────────────────────
 
 default allow := false
 
 allow if {
-    input.role == "agent"
+    standard_roles[input.role]
     not vip_customers[input.customer_id]
 }
+
 allow if {
-    input.role == "supervisor"
-    not vip_customers[input.customer_id]
+    privileged_roles[input.role]
 }
-allow if { input.role == "vip_agent" }
-allow if { input.role == "admin" }
+
 allow if {
-    input.role == "partner"
+    partner_roles[input.role]
     not vip_customers[input.customer_id]
     not startswith(input.path, "/api/unmask")
 }
 
 # ── Masked fields ─────────────────────────────────────────────────────────────
-# else-chain: only one branch fires per request, avoids conflicting
-# complete-rule definitions that OPA v1 rejects at compile time.
 
 masked_fields := [] if {
     startswith(input.path, "/api/unmask")
@@ -63,10 +128,6 @@ masked_fields := [] if {
 } else := []
 
 # ── Decision entry point ──────────────────────────────────────────────────────
-# A concrete complete rule (not a default) that Kong queries at
-# /v1/data/data_masking/decision.  All sub-rules have default values so
-# this object is always fully defined — OPA v1 emits it in the result
-# regardless of which sub-rules matched.
 
 decision := {
     "allow":         allow,

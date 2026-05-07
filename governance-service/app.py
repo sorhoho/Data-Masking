@@ -22,7 +22,24 @@ ADMIN_USER            = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS            = os.environ.get("ADMIN_PASSWORD", "admin123")
 LOG_DASHBOARD_URL     = os.environ.get("LOG_DASHBOARD_URL", "http://log-dashboard:9000/log")
 
-GOVERNED_ROLES = ["agent", "supervisor", "vip_agent", "admin", "partner"]
+GOVERNED_ROLES = [
+    # Legacy
+    "agent", "supervisor", "vip_agent", "admin", "partner",
+    # Care Operations
+    "care_l1", "care_l2", "care_supervisor",
+    # Technical Operations
+    "noc_operator", "field_technician", "roaming_ops",
+    # Business Operations
+    "billing_agent", "fraud_analyst", "compliance_officer",
+    # Audit
+    "audit_viewer",
+    # VIP
+    "vip_care",
+    # External Partners
+    "b2b_partner", "mvno_partner",
+    # Administration
+    "data_admin",
+]
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -110,10 +127,31 @@ def init_db():
     # Seed default SoD rules once
     if not qone(conn, "SELECT 1 FROM governance_sod_rules LIMIT 1"):
         defaults = [
-            ("agent",   "admin",     "Agents must not hold admin privileges"),
-            ("agent",   "vip_agent", "Agents must not bypass their own masking"),
-            ("partner", "admin",     "External partners must not be admins"),
-            ("partner", "vip_agent", "External partners must not access VIP data"),
+            # Legacy role conflicts
+            ("agent",              "admin",              "Agents must not hold admin privileges"),
+            ("agent",              "vip_agent",          "Agents must not bypass their own masking"),
+            ("partner",            "admin",              "External partners must not be admins"),
+            ("partner",            "vip_agent",          "External partners must not access VIP data"),
+            # Care vs privileged — front-line agents can't self-escalate
+            ("care_l1",            "fraud_analyst",      "L1 agents must not conduct fraud investigations"),
+            ("care_l1",            "compliance_officer", "L1 agents must not hold compliance authority"),
+            ("care_l1",            "data_admin",         "L1 agents must not have data admin access"),
+            ("care_l2",            "data_admin",         "L2 agents must not have data admin access"),
+            # Audit independence — auditors cannot also be admins
+            ("audit_viewer",       "data_admin",         "Auditors must be independent of data administration"),
+            ("audit_viewer",       "compliance_officer", "Audit and compliance must be separate functions"),
+            # External partner restrictions — no internal privileged roles
+            ("b2b_partner",        "data_admin",         "External B2B partners must not be data admins"),
+            ("b2b_partner",        "fraud_analyst",      "External partners must not access fraud tools"),
+            ("b2b_partner",        "compliance_officer", "External partners must not hold compliance authority"),
+            ("mvno_partner",       "data_admin",         "MVNO partners must not be data admins"),
+            ("mvno_partner",       "fraud_analyst",      "MVNO partners must not access fraud investigation tools"),
+            # Operations separation — technical and financial functions must be separate
+            ("field_technician",   "billing_agent",      "Technical and financial operations must be separated"),
+            ("noc_operator",       "billing_agent",      "Network ops and billing must be separated"),
+            ("billing_agent",      "fraud_analyst",      "Billing agents must not investigate their own processes"),
+            # Roaming ops is external-facing — no internal admin access
+            ("roaming_ops",        "data_admin",         "Roaming ops must not have unrestricted data access"),
         ]
         for role_a, role_b, reason in defaults:
             execute(conn,
