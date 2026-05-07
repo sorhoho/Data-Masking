@@ -62,6 +62,8 @@ plugins:
         - X-Access-Reference
         - X-Initiated-By
         - X-Session-Type
+        - X-Channel
+        - X-Purpose
       exposed_headers:
         - Content-Type
       credentials: true
@@ -397,6 +399,8 @@ plugins:
 
           local initiated_by = kong.request.get_header("X-Initiated-By") or "customer"
           local session_type = kong.request.get_header("X-Session-Type") or "normal"
+          local channel      = kong.request.get_header("X-Channel")      or "web"
+          local purpose      = kong.request.get_header("X-Purpose")      or ""
 
           -- Validate unmask token against governance-service
           local unmask_token  = kong.request.get_header("X-Unmask-Token")
@@ -450,6 +454,8 @@ plugins:
                           day_of_week      = utc_weekday,
                           initiated_by     = initiated_by,
                           session_type     = session_type,
+                          channel          = channel,
+                          purpose          = purpose,
                       },
                       unmask = {
                           valid       = unmask_valid,
@@ -476,11 +482,17 @@ plugins:
           local policy = opa_data.result or {}
 
           if not policy.allow then
+              local tier = policy.customer_tier or "standard"
               kong.log.info("OPA denied: user=", claims.preferred_username,
-                            " role=", user_role, " customer=", customer_id)
+                            " role=", user_role, " customer=", customer_id,
+                            " tier=", tier)
               kong.ctx.shared.deny_reason = "opa_denied"
-              if policy.is_vip then
+              if tier == "vip" then
                   return json_exit(403, "Access denied: VIP customer requires vip_agent or admin role")
+              elseif tier == "risk" then
+                  return json_exit(403, "Access denied: Risk-flagged customer requires fraud_analyst, compliance_officer, or admin role")
+              elseif tier == "premium" then
+                  return json_exit(403, "Access denied: Premium customer requires care_l2 or above")
               end
               return json_exit(403, "Access denied by security policy")
           end
@@ -491,8 +503,11 @@ plugins:
           kong.ctx.shared.user_role      = user_role
           kong.ctx.shared.username       = claims.preferred_username or "unknown"
           kong.ctx.shared.is_vip         = policy.is_vip == true
+          kong.ctx.shared.customer_tier  = policy.customer_tier or "standard"
           kong.ctx.shared.customer_id    = customer_id
           kong.ctx.shared.req_msisdn     = req_msisdn
+          kong.ctx.shared.channel        = channel
+          kong.ctx.shared.purpose        = purpose
 
           kong.log.info(
               "Access granted: user=", claims.preferred_username,
@@ -658,12 +673,14 @@ plugins:
           end
 
           data["_masking"] = {
-            applied       = true,
-            role          = kong.ctx.shared.user_role or "unknown",
-            masked_fields = masked_fields,
-            gateway       = "kong-opa",
-            is_vip        = kong.ctx.shared.is_vip or false,
-            backend       = kong.ctx.shared.backend or "unknown",
+            applied        = true,
+            role           = kong.ctx.shared.user_role or "unknown",
+            masked_fields  = masked_fields,
+            gateway        = "kong-opa",
+            is_vip         = kong.ctx.shared.is_vip or false,
+            customer_tier  = kong.ctx.shared.customer_tier or "standard",
+            backend        = kong.ctx.shared.backend or "unknown",
+            channel        = kong.ctx.shared.channel or "web",
           }
 
           local out, enc_err = cjson.encode(data)
@@ -693,6 +710,9 @@ plugins:
           local access_reference = kong.ctx.shared.access_reference
           local req_msisdn       = kong.ctx.shared.req_msisdn
           local backend          = kong.ctx.shared.backend or "unknown"
+          local customer_tier    = kong.ctx.shared.customer_tier or "standard"
+          local channel          = kong.ctx.shared.channel or "web"
+          local purpose          = kong.ctx.shared.purpose or ""
           local event_type
           if path:match("^/api/subscription") then
             event_type = "subscription_request"
@@ -738,6 +758,9 @@ plugins:
                   deny_reason      = deny_reason,
                   unmask_reason    = unmask_reason,
                   is_vip           = is_vip,
+                  customer_tier    = customer_tier,
+                  channel          = channel,
+                  purpose          = purpose ~= "" and purpose or nil,
                   access_reference = access_reference,
                   req_msisdn_hint  = req_msisdn and (req_msisdn:sub(1,4) .. "****") or nil,
                 }),

@@ -102,10 +102,12 @@ _DEFAULT_MASKS = [
     ("mvno_partner", "last_call_duration"), ("mvno_partner", "last_location"),
     # fraud_analyst, compliance_officer, vip_care, data_admin: nothing masked
 ]
-_DEFAULT_VIPS = [
-    ("C001", "Initial VIP – seeded on first run"),
-    ("C004", "Initial VIP – seeded on first run"),
+_DEFAULT_TIERS = [
+    ("C001", "vip",  "Initial VIP – seeded on first run"),
+    ("C004", "vip",  "Initial VIP – seeded on first run"),
 ]
+
+VALID_TIERS = ["standard", "premium", "vip", "risk"]
 
 _DEFAULT_BACKENDS = [
     ("crm",     "CRM System",      "http://crm-mock:5000",     "Main CRM — field names are canonical"),
@@ -179,6 +181,13 @@ def init_db():
             added_at    TEXT NOT NULL,
             notes       TEXT DEFAULT ''
         )""",
+        """CREATE TABLE IF NOT EXISTS customer_tiers (
+            customer_id TEXT PRIMARY KEY,
+            tier        TEXT NOT NULL DEFAULT 'vip',
+            added_by    TEXT DEFAULT 'system',
+            added_at    TEXT NOT NULL,
+            notes       TEXT DEFAULT ''
+        )""",
         """CREATE TABLE IF NOT EXISTS role_field_masks (
             role  TEXT NOT NULL,
             field TEXT NOT NULL,
@@ -210,11 +219,18 @@ def init_db():
         execute(conn, stmt)
 
     now = datetime.utcnow().isoformat()
-    if not qone(conn, "SELECT 1 FROM vip_customers LIMIT 1"):
+    # Migrate old vip_customers rows into customer_tiers as tier='vip'
+    execute(conn,
+        """INSERT INTO customer_tiers (customer_id, tier, added_by, added_at, notes)
+           SELECT customer_id, 'vip', added_by, added_at, notes
+           FROM vip_customers
+           ON CONFLICT (customer_id) DO NOTHING"""
+    )
+    if not qone(conn, "SELECT 1 FROM customer_tiers LIMIT 1"):
         executemany(conn,
-            "INSERT INTO vip_customers (customer_id, added_by, added_at, notes) "
-            "VALUES (%s, 'system', %s, %s)",
-            [(cid, now, note) for cid, note in _DEFAULT_VIPS],
+            "INSERT INTO customer_tiers (customer_id, tier, added_by, added_at, notes) "
+            "VALUES (%s, %s, 'system', %s, %s)",
+            [(cid, tier, now, note) for cid, tier, note in _DEFAULT_TIERS],
         )
     if not qone(conn, "SELECT 1 FROM role_field_masks LIMIT 1"):
         executemany(conn,
@@ -241,7 +257,7 @@ def init_db():
 
 def get_config():
     conn = get_db()
-    vip_rows     = qrows(conn, "SELECT customer_id FROM vip_customers")
+    tier_rows    = qrows(conn, "SELECT customer_id, tier FROM customer_tiers")
     mask_rows    = qrows(conn, "SELECT role, field FROM role_field_masks")
     mapping_rows = qrows(conn,
         "SELECT backend_id, backend_field, canonical_field, classification "
@@ -249,7 +265,7 @@ def get_config():
     )
     conn.close()
 
-    vip_customers = {row["customer_id"]: True for row in vip_rows}
+    customer_tiers = {row["customer_id"]: row["tier"] for row in tier_rows}
 
     role_masked_fields = {role: [] for role in ROLES}
     for row in mask_rows:
@@ -267,7 +283,7 @@ def get_config():
         }
 
     return {
-        "vip_customers":      vip_customers,
+        "customer_tiers":     customer_tiers,
         "role_masked_fields": role_masked_fields,
         "backends":           backends,
     }
@@ -390,59 +406,70 @@ def health():
             conn.close()
 
 
-# ── VIP management ────────────────────────────────────────────────────────────
+# ── Customer tier management ──────────────────────────────────────────────────
 
 @app.get("/vip")
 @login_required
 def vip_list():
-    conn      = get_db()
-    customers = qrows(conn, "SELECT * FROM vip_customers ORDER BY added_at DESC")
-    conn.close()
-    return render_template("vip.html", customers=customers)
+    return redirect(url_for("tier_list"))
 
 
-@app.post("/vip/add")
+@app.get("/tiers")
 @login_required
-def vip_add():
+def tier_list():
+    conn      = get_db()
+    customers = qrows(conn, "SELECT * FROM customer_tiers ORDER BY tier, added_at DESC")
+    conn.close()
+    return render_template("tiers.html", customers=customers, valid_tiers=VALID_TIERS)
+
+
+@app.post("/tiers/add")
+@login_required
+def tier_add():
     cid   = (request.form.get("customer_id") or "").strip().upper()
+    tier  = (request.form.get("tier") or "vip").strip().lower()
     notes = (request.form.get("notes") or "").strip()
     if not cid:
         flash("Customer ID is required", "danger")
-        return redirect(url_for("vip_list"))
+        return redirect(url_for("tier_list"))
+    if tier not in VALID_TIERS:
+        flash(f"Invalid tier '{tier}'", "danger")
+        return redirect(url_for("tier_list"))
     conn = get_db()
     try:
         execute(conn,
-            "INSERT INTO vip_customers (customer_id, added_by, added_at, notes) "
-            "VALUES (%s, %s, %s, %s)",
-            (cid, ADMIN_USER, datetime.utcnow().isoformat(), notes),
+            "INSERT INTO customer_tiers (customer_id, tier, added_by, added_at, notes) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (cid, tier, ADMIN_USER, datetime.utcnow().isoformat(), notes),
         )
         conn.commit()
         ok, msg = sync_to_opa()
         flash(
-            f"Added {cid} as VIP " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
+            f"Added {cid} as {tier.upper()} tier " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
             "success" if ok else "warning",
         )
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
-        flash(f"'{cid}' is already a VIP customer", "warning")
+        flash(f"'{cid}' already has a tier assigned — remove it first to reassign", "warning")
     finally:
         conn.close()
-    return redirect(url_for("vip_list"))
+    return redirect(url_for("tier_list"))
 
 
-@app.post("/vip/remove/<customer_id>")
+@app.post("/tiers/remove/<customer_id>")
 @login_required
-def vip_remove(customer_id):
+def tier_remove(customer_id):
     conn = get_db()
-    execute(conn, "DELETE FROM vip_customers WHERE customer_id = %s", (customer_id,))
+    execute(conn, "DELETE FROM customer_tiers WHERE customer_id = %s", (customer_id,))
     conn.commit()
     conn.close()
     ok, msg = sync_to_opa()
     flash(
-        f"Removed {customer_id} from VIP " + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
+        f"Removed {customer_id} from tier management (reverts to standard) "
+        + ("– synced to OPA ✓" if ok else f"– OPA sync failed: {msg}"),
         "success" if ok else "warning",
     )
-    return redirect(url_for("vip_list"))
+    return redirect(url_for("tier_list"))
 
 
 # ── Masking rules (role × field matrix) ──────────────────────────────────────

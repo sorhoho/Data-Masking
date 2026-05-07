@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Customer Tiers – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#127959; Customer Tier Management</h4>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card border-danger text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-danger">{{ customers | selectattr('tier','equalto','vip') | list | length }}</div>
+      <div class="small text-muted">VIP</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card border-primary text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-primary">{{ customers | selectattr('tier','equalto','premium') | list | length }}</div>
+      <div class="small text-muted">Premium</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card border-warning text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-warning">{{ customers | selectattr('tier','equalto','risk') | list | length }}</div>
+      <div class="small text-muted">Risk</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card border-secondary text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-secondary">{{ customers | selectattr('tier','equalto','standard') | list | length }}</div>
+      <div class="small text-muted">Standard (explicit)</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+
+  {# ── Assign tier ─────────────────────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">&#43; Assign Customer Tier</div>
+      <div class="card-body">
+        <form method="post" action="/tiers/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="cid">Customer ID</label>
+            <input id="cid" name="customer_id" type="text" class="form-control"
+                   placeholder="e.g. C005" required autofocus />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="tier">Tier</label>
+            <select id="tier" name="tier" class="form-select" required>
+              <option value="vip">VIP — privileged roles only</option>
+              <option value="premium">Premium — elevated standard roles</option>
+              <option value="risk">Risk — fraud/compliance/admin only</option>
+              <option value="standard">Standard — all standard roles</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="notes">Notes <span class="text-muted">(optional)</span></label>
+            <input id="notes" name="notes" type="text" class="form-control" placeholder="Reason or context" />
+          </div>
+          <button class="btn btn-dark w-100" type="submit">Assign &amp; Sync to OPA</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-3">
+      <div class="card-header fw-bold">Tier Access Matrix</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead class="table-light"><tr><th>Tier</th><th>Who can access</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge bg-danger">VIP</span></td><td class="small">Privileged roles only (vip_agent, admin, fraud_analyst…)</td></tr>
+            <tr><td><span class="badge bg-primary">Premium</span></td><td class="small">care_l2+, supervisor+, all privileged</td></tr>
+            <tr><td><span class="badge bg-warning text-dark">Risk</span></td><td class="small">fraud_analyst, compliance_officer, care_supervisor, data_admin, admin</td></tr>
+            <tr><td><span class="badge bg-secondary">Standard</span></td><td class="small">All authenticated roles</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# ── Current tier assignments ─────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span>Active Tier Assignments <span class="badge bg-dark ms-1">{{ customers | length }}</span></span>
+        <small class="text-muted fw-normal">Unassigned customers default to Standard</small>
+      </div>
+
+      {% if customers %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Customer ID</th>
+              <th>Tier</th>
+              <th>Added By</th>
+              <th>Added At</th>
+              <th>Notes</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in customers %}
+            {% set tier_colors = {'vip': 'danger', 'premium': 'primary', 'risk': 'warning', 'standard': 'secondary'} %}
+            <tr>
+              <td><code class="fw-bold">{{ c['customer_id'] }}</code></td>
+              <td>
+                <span class="badge bg-{{ tier_colors.get(c['tier'], 'secondary') }} {{ 'text-dark' if c['tier'] == 'risk' else '' }}">
+                  {{ c['tier'] | upper }}
+                </span>
+              </td>
+              <td><code>{{ c['added_by'] }}</code></td>
+              <td class="text-muted small">{{ c['added_at'][:19] | replace('T', ' ') }} UTC</td>
+              <td class="small text-muted">{{ c['notes'] or '—' }}</td>
+              <td class="text-end">
+                <form method="post" action="/tiers/remove/{{ c['customer_id'] }}"
+                      onsubmit="return confirm('Remove {{ c['customer_id'] }} tier assignment?')">
+                  <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="card-body text-muted">No tier assignments — all customers are Standard by default.</div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<div class="alert alert-secondary mt-4 small">
+  <strong>How tier enforcement works:</strong>
+  OPA reads <code>customer_tiers</code> from the bundle and applies access rules per tier.
+  Customers not in this table default to <strong>Standard</strong> (all standard roles allowed).
+  Changes sync to OPA on the next bundle poll (≤ 60 s) or immediately on manual sync.
+</div>
+{% endblock %}
