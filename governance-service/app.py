@@ -95,11 +95,60 @@ def init_db():
             decided_at  TIMESTAMPTZ,
             decided_by  VARCHAR(255)
         )""",
+        """CREATE TABLE IF NOT EXISTS governance_sod_rules (
+            id         SERIAL PRIMARY KEY,
+            role_a     VARCHAR(100) NOT NULL,
+            role_b     VARCHAR(100) NOT NULL,
+            reason     TEXT DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(role_a, role_b)
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
+
+    # Seed default SoD rules once
+    if not qone(conn, "SELECT 1 FROM governance_sod_rules LIMIT 1"):
+        defaults = [
+            ("agent",   "admin",     "Agents must not hold admin privileges"),
+            ("agent",   "vip_agent", "Agents must not bypass their own masking"),
+            ("partner", "admin",     "External partners must not be admins"),
+            ("partner", "vip_agent", "External partners must not access VIP data"),
+        ]
+        for role_a, role_b, reason in defaults:
+            execute(conn,
+                "INSERT INTO governance_sod_rules (role_a, role_b, reason) VALUES (%s,%s,%s) "
+                "ON CONFLICT DO NOTHING",
+                (role_a, role_b, reason))
+
     conn.commit()
     conn.close()
+
+
+# ── Separation of Duties ─────────────────────────────────────────────────────
+
+def sod_check(user_id, requested_role):
+    """Return (ok, reason). ok=False means the assignment would violate a SoD rule."""
+    if not requested_role:
+        return True, None
+    try:
+        existing = kc_get_user_roles(user_id)
+    except Exception:
+        return True, None  # can't check — let through, admin can verify manually
+
+    conn = get_db()
+    rules = qrows(conn, "SELECT * FROM governance_sod_rules")
+    conn.close()
+
+    for rule in rules:
+        pair = {rule["role_a"], rule["role_b"]}
+        for held in existing:
+            if {held, requested_role} == pair:
+                return False, (
+                    f"SoD violation: '{held}' and '{requested_role}' are incompatible "
+                    f"— {rule['reason']}"
+                )
+    return True, None
 
 
 # ── Keycloak Admin REST API ───────────────────────────────────────────────────
@@ -306,6 +355,10 @@ def request_approve(req_id):
             log_event("offboarding_executed",
                       {"username": row["username"], "revoked_roles": revoked})
         else:
+            ok, reason = sod_check(row["user_id"], row["requested_role"])
+            if not ok:
+                flash(f"Blocked: {reason}", "danger")
+                return redirect(url_for("requests_list"))
             if row["request_type"] == "change" and row["old_role"]:
                 kc_revoke_role(row["user_id"], row["old_role"])
             if row["requested_role"]:
@@ -398,6 +451,53 @@ def request_role_change(user_id):
               {"username": username, "type": req_type, "requested_role": new_role})
     flash(f"Role change request submitted for {username}", "success")
     return redirect(url_for("requests_list"))
+
+
+# ── Separation of Duties management ──────────────────────────────────────────
+
+@app.get("/sod")
+@login_required
+def sod_list():
+    conn  = get_db()
+    rules = qrows(conn, "SELECT * FROM governance_sod_rules ORDER BY id")
+    conn.close()
+    return render_template("sod.html", rules=rules, roles=GOVERNED_ROLES)
+
+
+@app.post("/sod/add")
+@login_required
+def sod_add():
+    role_a = request.form.get("role_a", "").strip()
+    role_b = request.form.get("role_b", "").strip()
+    reason = request.form.get("reason", "").strip()
+    if not role_a or not role_b or role_a == role_b:
+        flash("Two distinct roles are required", "danger")
+        return redirect(url_for("sod_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO governance_sod_rules (role_a, role_b, reason) VALUES (%s,%s,%s)",
+            (role_a, role_b, reason))
+        conn.commit()
+        flash(f"SoD rule added: {role_a} ✕ {role_b}", "success")
+        log_event("sod_rule_added", {"role_a": role_a, "role_b": role_b})
+    except Exception:
+        conn.rollback()
+        flash("Rule already exists", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("sod_list"))
+
+
+@app.post("/sod/<int:rule_id>/delete")
+@login_required
+def sod_delete(rule_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM governance_sod_rules WHERE id=%s", (rule_id,))
+    conn.commit()
+    conn.close()
+    flash("SoD rule removed", "warning")
+    return redirect(url_for("sod_list"))
 
 
 # ── Access Reviews ────────────────────────────────────────────────────────────
@@ -513,11 +613,31 @@ def review_apply(campaign_id):
 
 # ── Expiry background worker ──────────────────────────────────────────────────
 
+def _kc_revoke_role_raw(user_id, role_name):
+    """Standalone revoke that gets its own admin token — safe to call from background thread."""
+    token_resp = requests.post(
+        f"{KEYCLOAK_INTERNAL_URL}/realms/master/protocol/openid-connect/token",
+        data={"grant_type": "password", "client_id": "admin-cli",
+              "username": KEYCLOAK_ADMIN_USER, "password": KEYCLOAK_ADMIN_PASS},
+        timeout=5)
+    token = token_resp.json()["access_token"]
+    hdrs  = {"Authorization": f"Bearer {token}"}
+    role_resp = requests.get(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/roles/{role_name}",
+        headers=hdrs, timeout=5)
+    requests.delete(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+        f"/users/{user_id}/role-mappings/realm",
+        headers=hdrs, json=[role_resp.json()], timeout=5)
+
+
 def _expiry_worker():
     while True:
         time.sleep(60)
         try:
             conn = psycopg2.connect(DATABASE_URL)
+
+            # ── 1. Time-bound role expiry ─────────────────────────────────────
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """SELECT * FROM governance_role_requests
@@ -528,23 +648,7 @@ def _expiry_worker():
 
             for row in expired:
                 try:
-                    # Get fresh token per revocation to avoid expiry
-                    token_resp = requests.post(
-                        f"{KEYCLOAK_INTERNAL_URL}/realms/master/protocol/openid-connect/token",
-                        data={"grant_type": "password", "client_id": "admin-cli",
-                              "username": KEYCLOAK_ADMIN_USER, "password": KEYCLOAK_ADMIN_PASS},
-                        timeout=5)
-                    token = token_resp.json()["access_token"]
-                    hdrs  = {"Authorization": f"Bearer {token}"}
-
-                    role_resp = requests.get(
-                        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/roles/{row['requested_role']}",
-                        headers=hdrs, timeout=5)
-                    requests.delete(
-                        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
-                        f"/users/{row['user_id']}/role-mappings/realm",
-                        headers=hdrs, json=[role_resp.json()], timeout=5)
-
+                    _kc_revoke_role_raw(row["user_id"], row["requested_role"])
                     with conn.cursor() as cur:
                         cur.execute(
                             "UPDATE governance_role_requests SET revoked_at=NOW() WHERE id=%s",
@@ -554,9 +658,146 @@ def _expiry_worker():
                               {"username": row["username"], "role": row["requested_role"]})
                 except Exception:
                     pass
+
+            # ── 2. Access review auto-apply on due date ───────────────────────
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT * FROM governance_access_campaigns
+                       WHERE status='active' AND due_date < CURRENT_DATE""")
+                overdue = cur.fetchall()
+
+            for campaign in overdue:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """SELECT * FROM governance_review_items
+                           WHERE campaign_id=%s AND decision IN ('revoke','pending')""",
+                        (campaign["id"],))
+                    to_revoke = cur.fetchall()
+
+                revoked_count = 0
+                for item in to_revoke:
+                    try:
+                        _kc_revoke_role_raw(item["user_id"], item["role_name"])
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE governance_review_items SET decision='revoke', "
+                                "decided_at=NOW(), decided_by='auto-apply' WHERE id=%s",
+                                (item["id"],))
+                        revoked_count += 1
+                    except Exception:
+                        pass
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE governance_access_campaigns SET status='completed', "
+                        "completed_at=NOW() WHERE id=%s",
+                        (campaign["id"],))
+                conn.commit()
+                log_event("access_review_auto_applied",
+                          {"campaign": campaign["name"], "revoked": revoked_count})
+
             conn.close()
         except Exception:
             pass
+
+
+# ── Self-service portal ───────────────────────────────────────────────────────
+
+def portal_login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("portal_user_id"):
+            return redirect(url_for("portal_login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/portal/login", methods=["GET", "POST"])
+def portal_login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        try:
+            resp = requests.post(
+                f"{KEYCLOAK_INTERNAL_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token",
+                data={
+                    "grant_type": "password",
+                    "client_id":  "governance-portal",
+                    "username":   username,
+                    "password":   password,
+                },
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                flash("Invalid credentials", "danger")
+                return render_template("portal_login.html")
+
+            token_data = resp.json()
+            # Decode sub (user_id) from token without verifying signature (internal trust)
+            import base64, json as _json
+            payload = token_data["access_token"].split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = _json.loads(base64.b64decode(payload))
+
+            session["portal_user_id"] = claims["sub"]
+            session["portal_username"] = claims.get("preferred_username", username)
+            session["portal_email"]    = claims.get("email", "")
+            return redirect(url_for("portal_dashboard"))
+        except Exception as e:
+            flash(f"Login error: {e}", "danger")
+    return render_template("portal_login.html")
+
+
+@app.get("/portal/logout")
+def portal_logout():
+    session.pop("portal_user_id", None)
+    session.pop("portal_username", None)
+    session.pop("portal_email", None)
+    return redirect(url_for("portal_login"))
+
+
+@app.get("/portal")
+@portal_login_required
+def portal_dashboard():
+    user_id  = session["portal_user_id"]
+    username = session["portal_username"]
+    try:
+        my_roles = kc_get_user_roles(user_id)
+    except Exception:
+        my_roles = []
+    conn = get_db()
+    my_requests = qrows(conn,
+        "SELECT * FROM governance_role_requests WHERE user_id=%s ORDER BY requested_at DESC LIMIT 10",
+        (user_id,))
+    conn.close()
+    return render_template("portal_dashboard.html",
+                           username=username, my_roles=my_roles,
+                           my_requests=my_requests, roles=GOVERNED_ROLES)
+
+
+@app.post("/portal/request")
+@portal_login_required
+def portal_request():
+    user_id  = session["portal_user_id"]
+    username = session["portal_username"]
+    email    = session["portal_email"]
+    requested_role = request.form.get("requested_role") or None
+    old_role       = request.form.get("old_role") or None
+    expires_at     = request.form.get("expires_at") or None
+    notes          = request.form.get("notes", "")
+    req_type       = "onboarding" if not old_role else "change"
+
+    conn = get_db()
+    execute(conn,
+        """INSERT INTO governance_role_requests
+           (user_id, username, email, request_type, requested_role, old_role, expires_at, notes)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (user_id, username, email, req_type, requested_role, old_role, expires_at, notes))
+    conn.commit()
+    conn.close()
+    log_event("portal_role_request", {"username": username, "requested_role": requested_role})
+    flash("Request submitted — an admin will review it shortly", "success")
+    return redirect(url_for("portal_dashboard"))
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────

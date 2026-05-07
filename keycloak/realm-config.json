@@ -80,29 +80,53 @@
         "email",
         "roles"
       ]
+    },
+    {
+      "clientId": "governance-portal",
+      "name": "Governance Self-Service Portal",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "attributes": {}
     }
   ],
   "roles": {
     "realm": [
       {
         "name": "agent",
-        "description": "Customer service agent – sees masked PII (L1+L2), no VIP access"
+        "description": "Customer service agent \u2013 sees masked PII (L1+L2), no VIP access"
       },
       {
         "name": "supervisor",
-        "description": "Team supervisor – sees partial L1 masking, no VIP access"
+        "description": "Team supervisor \u2013 sees partial L1 masking, no VIP access"
       },
       {
         "name": "vip_agent",
-        "description": "VIP-authorised agent – full PII access, mandatory access reference"
+        "description": "VIP-authorised agent \u2013 full PII access, mandatory access reference"
       },
       {
         "name": "admin",
-        "description": "System admin – full access to all data including VIP"
+        "description": "System admin \u2013 full access to all data including VIP"
       },
       {
         "name": "partner",
-        "description": "External partner (M2M) – full L1+L2 masking, no VIP access, no unmask"
+        "description": "External partner (M2M) \u2013 full L1+L2 masking, no VIP access, no unmask"
       }
     ]
   },
