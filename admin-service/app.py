@@ -297,11 +297,20 @@ def sync_to_opa(retries=3):
 # ── OPA bundle endpoint (Item 9) ──────────────────────────────────────────────
 
 def build_bundle():
-    """Build a gzipped tar bundle containing masking_config/data.json."""
+    """Build a gzipped tar bundle containing masking_config/data.json.
+
+    The .manifest scopes the bundle to the 'masking_config' root so OPA 1.x
+    does not claim the entire data namespace, allowing policy.rego (package
+    data_masking) to be loaded from the command-line argument.
+    """
     config     = get_config()
     data_bytes = json.dumps(config).encode("utf-8")
+    manifest_bytes = json.dumps({"revision": "", "roots": ["masking_config"]}).encode("utf-8")
     buf        = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        minfo      = tarfile.TarInfo(name=".manifest")
+        minfo.size = len(manifest_bytes)
+        tar.addfile(minfo, io.BytesIO(manifest_bytes))
         info      = tarfile.TarInfo(name="masking_config/data.json")
         info.size = len(data_bytes)
         tar.addfile(info, io.BytesIO(data_bytes))
