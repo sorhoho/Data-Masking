@@ -161,15 +161,13 @@ _effective_masked contains f if {
     not _token_unmasked[f]
 }
 
-# Convert the effective set to an array (separate rule avoids inline
-# comprehension in else clause which OPA v1 may not evaluate correctly).
-_effective_masked_array := [f | _effective_masked[f]]
-
 # ── Masked fields ─────────────────────────────────────────────────────────────
+# Single comprehension: path-guard acts as filter so unmask paths return [].
 
-masked_fields := [] if {
-    startswith(input.path, "/api/unmask")
-} else := _effective_masked_array
+masked_fields := [f |
+    _effective_masked[f]
+    not startswith(input.path, "/api/unmask")
+]
 
 # ── Decision entry point ──────────────────────────────────────────────────────
 
