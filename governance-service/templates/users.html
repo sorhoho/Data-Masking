@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+
+<h4 class="fw-bold mb-4">Users &amp; Role Assignments</h4>
+
+<div class="table-responsive">
+  <table class="table table-hover bg-white rounded shadow-sm">
+    <thead class="table-light">
+      <tr>
+        <th>Username</th><th>Email</th><th>Current roles</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td><strong>{{ u.username }}</strong></td>
+        <td class="text-muted small">{{ u.email or '—' }}</td>
+        <td>
+          {% for role in u.governed_roles %}
+            <span class="badge bg-dark me-1">{{ role }}</span>
+          {% else %}
+            <span class="text-muted">none</span>
+          {% endfor %}
+        </td>
+        <td>
+          <!-- Role change / onboarding -->
+          <button class="btn btn-sm btn-outline-primary me-1"
+                  data-bs-toggle="modal"
+                  data-bs-target="#changeModal-{{ u.id }}">
+            Change role
+          </button>
+          <!-- Offboard -->
+          <button class="btn btn-sm btn-outline-danger"
+                  data-bs-toggle="modal"
+                  data-bs-target="#offboardModal-{{ u.id }}">
+            Offboard
+          </button>
+
+          <!-- Change role modal -->
+          <div class="modal fade" id="changeModal-{{ u.id }}" tabindex="-1">
+            <div class="modal-dialog">
+              <div class="modal-content">
+                <form method="post" action="/users/{{ u.id }}/request-change">
+                  <input type="hidden" name="username" value="{{ u.username }}">
+                  <input type="hidden" name="email"    value="{{ u.email or '' }}">
+                  <div class="modal-header">
+                    <h5 class="modal-title">Role change — {{ u.username }}</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body">
+                    <div class="row g-2 mb-3">
+                      <div class="col">
+                        <label class="form-label fw-semibold">Current role</label>
+                        <select class="form-select" name="current_role">
+                          <option value="">None (new onboarding)</option>
+                          {% for r in u.governed_roles %}
+                          <option value="{{ r }}" selected>{{ r }}</option>
+                          {% endfor %}
+                          {% for r in roles %}
+                          {% if r not in u.governed_roles %}
+                          <option value="{{ r }}">{{ r }}</option>
+                          {% endif %}
+                          {% endfor %}
+                        </select>
+                      </div>
+                      <div class="col">
+                        <label class="form-label fw-semibold">New role</label>
+                        <select class="form-select" name="new_role">
+                          <option value="">Select…</option>
+                          {% for r in roles %}
+                          <option value="{{ r }}">{{ r }}</option>
+                          {% endfor %}
+                        </select>
+                      </div>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label fw-semibold">Expires at <small class="text-muted">(optional)</small></label>
+                      <input type="datetime-local" class="form-control" name="expires_at">
+                    </div>
+                    <div class="mb-2">
+                      <label class="form-label fw-semibold">Notes</label>
+                      <textarea class="form-control" name="notes" rows="2"></textarea>
+                    </div>
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Submit request</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Offboard modal -->
+          <div class="modal fade" id="offboardModal-{{ u.id }}" tabindex="-1">
+            <div class="modal-dialog modal-sm">
+              <div class="modal-content">
+                <form method="post" action="/users/{{ u.id }}/offboard">
+                  <input type="hidden" name="username" value="{{ u.username }}">
+                  <div class="modal-header bg-danger text-white">
+                    <h6 class="modal-title">Offboard {{ u.username }}?</h6>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <div class="modal-body">
+                    <p class="small text-muted mb-2">
+                      This creates an offboarding request. On approval, all governed roles will be revoked in Keycloak.
+                    </p>
+                    <textarea class="form-control form-control-sm" name="notes" placeholder="Reason / ticket #" rows="2"></textarea>
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-danger btn-sm">Create offboarding request</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-center text-muted py-4">No users found — is Keycloak running?</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

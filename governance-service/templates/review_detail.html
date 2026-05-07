@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}{{ campaign.name }}{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-1">
+  <h4 class="fw-bold mb-0">{{ campaign.name }}</h4>
+  <span class="badge badge-{{ campaign.status }} fs-6">{{ campaign.status }}</span>
+</div>
+<p class="text-muted mb-1">Due: <strong>{{ campaign.due_date }}</strong></p>
+{% if campaign.description %}<p class="text-muted small mb-3">{{ campaign.description }}</p>{% endif %}
+
+{% if campaign.status == 'active' %}
+<div class="alert alert-info py-2">
+  <strong>{{ pending }}</strong> decision(s) still pending.
+  Save decisions first, then click <strong>Apply &amp; close</strong> to revoke roles in Keycloak.
+</div>
+
+<form method="post" action="/reviews/{{ campaign.id }}/decide">
+  <div class="table-responsive mb-3">
+    <table class="table table-hover bg-white rounded shadow-sm">
+      <thead class="table-light">
+        <tr><th>User</th><th>Email</th><th>Role</th><th>Decision</th></tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr class="{% if item.decision == 'revoke' %}table-danger{% elif item.decision == 'keep' %}table-success{% endif %}">
+          <td><strong>{{ item.username }}</strong></td>
+          <td class="small text-muted">{{ item.email or '—' }}</td>
+          <td><span class="badge bg-dark">{{ item.current_role }}</span></td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <input type="radio" class="btn-check" name="decision_{{ item.id }}"
+                     id="keep_{{ item.id }}" value="keep"
+                     {% if item.decision == 'keep' %}checked{% endif %}>
+              <label class="btn btn-outline-success" for="keep_{{ item.id }}">Keep</label>
+
+              <input type="radio" class="btn-check" name="decision_{{ item.id }}"
+                     id="rev_{{ item.id }}" value="revoke"
+                     {% if item.decision == 'revoke' %}checked{% endif %}>
+              <label class="btn btn-outline-danger" for="rev_{{ item.id }}">Revoke</label>
+
+              <input type="radio" class="btn-check" name="decision_{{ item.id }}"
+                     id="pend_{{ item.id }}" value="pending"
+                     {% if item.decision == 'pending' %}checked{% endif %}>
+              <label class="btn btn-outline-secondary" for="pend_{{ item.id }}">Pending</label>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-center text-muted">No items in this campaign</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-primary">Save decisions</button>
+    <a href="/reviews" class="btn btn-outline-secondary">Back</a>
+  </div>
+</form>
+
+{% if pending == 0 %}
+<form method="post" action="/reviews/{{ campaign.id }}/apply" class="mt-3">
+  <button class="btn btn-danger"
+    onclick="return confirm('Apply all decisions? Revoked roles will be removed in Keycloak immediately.')">
+    Apply &amp; close campaign
+  </button>
+</form>
+{% endif %}
+
+{% else %}
+<!-- Completed view (read-only) -->
+<div class="table-responsive">
+  <table class="table table-hover bg-white rounded shadow-sm">
+    <thead class="table-light">
+      <tr><th>User</th><th>Email</th><th>Role</th><th>Decision</th><th>Decided by</th><th>At</th></tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr class="{% if item.decision == 'revoke' %}table-danger{% elif item.decision == 'keep' %}table-success{% endif %}">
+        <td>{{ item.username }}</td>
+        <td class="small text-muted">{{ item.email or '—' }}</td>
+        <td><span class="badge bg-dark">{{ item.current_role }}</span></td>
+        <td><span class="badge badge-{{ item.decision if item.decision != 'pending' else 'secondary' }}">{{ item.decision }}</span></td>
+        <td class="small">{{ item.decided_by or '—' }}</td>
+        <td class="small text-muted">{{ item.decided_at.strftime('%Y-%m-%d %H:%M') if item.decided_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<a href="/reviews" class="btn btn-outline-secondary mt-2">Back</a>
+{% endif %}
+
+{% endblock %}

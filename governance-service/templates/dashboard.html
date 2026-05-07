@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Governance Dashboard{% endblock %}
+{% block content %}
+
+<h4 class="fw-bold mb-4">Governance Dashboard</h4>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-4">
+    <div class="card text-bg-warning h-100">
+      <div class="card-body">
+        <div class="fs-1 fw-bold">{{ pending }}</div>
+        <div>Pending requests</div>
+        <a href="/requests?status=pending" class="stretched-link"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card text-bg-primary h-100">
+      <div class="card-body">
+        <div class="fs-1 fw-bold">{{ active_reviews }}</div>
+        <div>Active access reviews</div>
+        <a href="/reviews" class="stretched-link"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card text-bg-secondary h-100">
+      <div class="card-body">
+        <div class="fs-1 fw-bold">&#128100;</div>
+        <div>Manage users</div>
+        <a href="/users" class="stretched-link"></a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h6 class="fw-semibold mb-2">Recent activity</h6>
+<div class="table-responsive">
+  <table class="table table-sm table-hover bg-white rounded shadow-sm">
+    <thead class="table-light">
+      <tr>
+        <th>#</th><th>User</th><th>Type</th><th>Role requested</th><th>Status</th><th>Submitted</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in recent %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.username }}</td>
+        <td><span class="badge bg-secondary">{{ r.request_type }}</span></td>
+        <td>{{ r.requested_role or '—' }}</td>
+        <td>
+          <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+        </td>
+        <td class="text-muted small">{{ r.requested_at.strftime('%Y-%m-%d %H:%M') if r.requested_at else '' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="text-center text-muted">No activity yet</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}
