@@ -34,7 +34,7 @@
         <td>{{ r.id }}</td>
         <td><strong>{{ r.username }}</strong><br><small class="text-muted">{{ r.email }}</small></td>
         <td><span class="badge bg-secondary">{{ r.request_type }}</span></td>
-        <td>{{ r.current_role or '—' }}</td>
+        <td>{{ r.old_role or '—' }}</td>
         <td>{{ r.requested_role or '—' }}</td>
         <td class="small text-muted">
           {% if r.expires_at %}

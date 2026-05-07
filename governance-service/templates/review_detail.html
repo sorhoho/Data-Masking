@@ -26,7 +26,7 @@
         <tr class="{% if item.decision == 'revoke' %}table-danger{% elif item.decision == 'keep' %}table-success{% endif %}">
           <td><strong>{{ item.username }}</strong></td>
           <td class="small text-muted">{{ item.email or '—' }}</td>
-          <td><span class="badge bg-dark">{{ item.current_role }}</span></td>
+          <td><span class="badge bg-dark">{{ item.role_name }}</span></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
               <input type="radio" class="btn-check" name="decision_{{ item.id }}"
@@ -80,7 +80,7 @@
       <tr class="{% if item.decision == 'revoke' %}table-danger{% elif item.decision == 'keep' %}table-success{% endif %}">
         <td>{{ item.username }}</td>
         <td class="small text-muted">{{ item.email or '—' }}</td>
-        <td><span class="badge bg-dark">{{ item.current_role }}</span></td>
+        <td><span class="badge bg-dark">{{ item.role_name }}</span></td>
         <td><span class="badge badge-{{ item.decision if item.decision != 'pending' else 'secondary' }}">{{ item.decision }}</span></td>
         <td class="small">{{ item.decided_by or '—' }}</td>
         <td class="small text-muted">{{ item.decided_at.strftime('%Y-%m-%d %H:%M') if item.decided_at else '—' }}</td>

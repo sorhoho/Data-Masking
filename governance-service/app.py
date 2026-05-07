@@ -59,20 +59,20 @@ def init_db():
     conn = get_db()
     stmts = [
         """CREATE TABLE IF NOT EXISTS governance_role_requests (
-            id           SERIAL PRIMARY KEY,
-            user_id      VARCHAR(255) NOT NULL,
-            username     VARCHAR(255) NOT NULL,
-            email        VARCHAR(255) DEFAULT '',
-            request_type VARCHAR(50)  NOT NULL,
+            id             SERIAL PRIMARY KEY,
+            user_id        VARCHAR(255) NOT NULL,
+            username       VARCHAR(255) NOT NULL,
+            email          VARCHAR(255) DEFAULT '',
+            request_type   VARCHAR(50)  NOT NULL,
             requested_role VARCHAR(100),
-            current_role   VARCHAR(100),
-            status       VARCHAR(50)  NOT NULL DEFAULT 'pending',
-            requested_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-            reviewed_at  TIMESTAMPTZ,
-            reviewed_by  VARCHAR(255),
-            expires_at   TIMESTAMPTZ,
-            notes        TEXT DEFAULT '',
-            revoked_at   TIMESTAMPTZ
+            old_role       VARCHAR(100),
+            status         VARCHAR(50)  NOT NULL DEFAULT 'pending',
+            requested_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            reviewed_at    TIMESTAMPTZ,
+            reviewed_by    VARCHAR(255),
+            expires_at     TIMESTAMPTZ,
+            notes          TEXT DEFAULT '',
+            revoked_at     TIMESTAMPTZ
         )""",
         """CREATE TABLE IF NOT EXISTS governance_access_campaigns (
             id           SERIAL PRIMARY KEY,
@@ -90,7 +90,7 @@ def init_db():
             user_id     VARCHAR(255) NOT NULL,
             username    VARCHAR(255) NOT NULL,
             email       VARCHAR(255) DEFAULT '',
-            current_role VARCHAR(100) NOT NULL,
+            role_name   VARCHAR(100) NOT NULL,
             decision    VARCHAR(50) NOT NULL DEFAULT 'pending',
             decided_at  TIMESTAMPTZ,
             decided_by  VARCHAR(255)
@@ -272,16 +272,16 @@ def request_new():
     email          = request.form.get("email", "")
     request_type   = request.form["request_type"]
     requested_role = request.form.get("requested_role") or None
-    current_role   = request.form.get("current_role") or None
+    old_role       = request.form.get("current_role") or None
     expires_at     = request.form.get("expires_at") or None
     notes          = request.form.get("notes", "")
 
     conn = get_db()
     execute(conn,
         """INSERT INTO governance_role_requests
-           (user_id, username, email, request_type, requested_role, current_role, expires_at, notes)
+           (user_id, username, email, request_type, requested_role, old_role, expires_at, notes)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (user_id, username, email, request_type, requested_role, current_role, expires_at, notes))
+        (user_id, username, email, request_type, requested_role, old_role, expires_at, notes))
     conn.commit()
     conn.close()
     log_event("role_request_submitted",
@@ -306,8 +306,8 @@ def request_approve(req_id):
             log_event("offboarding_executed",
                       {"username": row["username"], "revoked_roles": revoked})
         else:
-            if row["request_type"] == "change" and row["current_role"]:
-                kc_revoke_role(row["user_id"], row["current_role"])
+            if row["request_type"] == "change" and row["old_role"]:
+                kc_revoke_role(row["user_id"], row["old_role"])
             if row["requested_role"]:
                 kc_assign_role(row["user_id"], row["requested_role"])
             log_event("role_assigned",
@@ -380,18 +380,18 @@ def offboard_user(user_id):
 def request_role_change(user_id):
     username     = request.form.get("username", user_id)
     email        = request.form.get("email", "")
-    current_role = request.form.get("current_role") or None
-    new_role     = request.form.get("new_role") or None
-    expires_at   = request.form.get("expires_at") or None
-    notes        = request.form.get("notes", "")
-    req_type     = "onboarding" if not current_role else "change"
+    old_role   = request.form.get("current_role") or None
+    new_role   = request.form.get("new_role") or None
+    expires_at = request.form.get("expires_at") or None
+    notes      = request.form.get("notes", "")
+    req_type   = "onboarding" if not old_role else "change"
 
     conn = get_db()
     execute(conn,
         """INSERT INTO governance_role_requests
-           (user_id, username, email, request_type, requested_role, current_role, expires_at, notes)
+           (user_id, username, email, request_type, requested_role, old_role, expires_at, notes)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (user_id, username, email, req_type, new_role, current_role, expires_at, notes))
+        (user_id, username, email, req_type, new_role, old_role, expires_at, notes))
     conn.commit()
     conn.close()
     log_event("role_request_submitted",
@@ -433,7 +433,7 @@ def review_new():
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO governance_review_items "
-                        "(campaign_id, user_id, username, email, current_role) VALUES (%s,%s,%s,%s,%s)",
+                        "(campaign_id, user_id, username, email, role_name) VALUES (%s,%s,%s,%s,%s)",
                         (campaign_id, u["id"], u.get("username", ""), u.get("email", ""), role))
     except Exception as e:
         flash(f"Warning: partial Keycloak population: {e}", "warning")
@@ -489,9 +489,9 @@ def review_apply(campaign_id):
     revoked, errors = 0, []
     for item in items:
         try:
-            kc_revoke_role(item["user_id"], item["current_role"])
+            kc_revoke_role(item["user_id"], item["role_name"])
             log_event("role_revoked_by_review",
-                      {"username": item["username"], "role": item["current_role"]})
+                      {"username": item["username"], "role": item["role_name"]})
             revoked += 1
         except Exception as e:
             errors.append(f"{item['username']}: {e}")
@@ -559,9 +559,6 @@ def _expiry_worker():
             pass
 
 
-threading.Thread(target=_expiry_worker, daemon=True).start()
-
-
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -574,4 +571,5 @@ if __name__ == "__main__":
             wait = 2 ** i
             print(f"DB not ready ({exc}), retry in {wait}s…")
             time.sleep(wait)
+    threading.Thread(target=_expiry_worker, daemon=True).start()
     app.run(host="0.0.0.0", port=8889, debug=False)
