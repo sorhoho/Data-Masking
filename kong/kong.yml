@@ -58,7 +58,10 @@ plugins:
         - Authorization
         - Content-Type
         - X-Unmask-Reason
+        - X-Unmask-Token
         - X-Access-Reference
+        - X-Initiated-By
+        - X-Session-Type
       exposed_headers:
         - Content-Type
       credentials: true
@@ -72,10 +75,29 @@ plugins:
           local http  = require("resty.http")
           local cjson = require("cjson.safe")
 
-          local OPA_URL          = os.getenv("OPA_URL")          or "http://opa:8181/v1/data/data_masking/decision"
-          local LOG_URL          = os.getenv("LOG_DASHBOARD_URL") or "http://log-dashboard:9000/log"
-          local CRM_INTERNAL_URL = os.getenv("CRM_INTERNAL_URL") or "http://crm-mock:5000"
-          local ROLE_PRIORITY    = { admin = 4, supervisor = 3, vip_agent = 2, agent = 1, partner = 1 }
+          local OPA_URL            = os.getenv("OPA_URL")               or "http://opa:8181/v1/data/data_masking/decision"
+          local LOG_URL            = os.getenv("LOG_DASHBOARD_URL")     or "http://log-dashboard:9000/log"
+          local CRM_INTERNAL_URL   = os.getenv("CRM_INTERNAL_URL")      or "http://crm-mock:5000"
+          local GOVERNANCE_URL     = os.getenv("GOVERNANCE_INTERNAL_URL") or "http://governance-service:8889"
+          local ROLE_PRIORITY = {
+              -- Administration
+              admin              = 10, data_admin         = 9,
+              -- Compliance & Fraud (full PII access)
+              compliance_officer = 8,  fraud_analyst      = 8,
+              -- VIP service
+              vip_agent          = 7,  vip_care           = 7,
+              -- Supervisors
+              supervisor         = 6,  care_supervisor    = 6,
+              -- Mid-tier operations
+              care_l2            = 5,  billing_agent      = 5,  roaming_ops = 5,
+              -- Standard operations
+              care_l1            = 4,  noc_operator       = 4,
+              field_technician   = 4,  audit_viewer       = 4,
+              -- Basic agent
+              agent              = 3,
+              -- External partners (lowest)
+              partner            = 2,  b2b_partner        = 2,  mvno_partner = 2,
+          }
 
           kong.ctx.shared.opa_allowed = false
           kong.ctx.shared.deny_reason = nil
@@ -364,7 +386,50 @@ plugins:
               end
           end
 
-          -- ── 5. OPA policy check ───────────────────────────────────────────
+          -- ── 5. Context signals + unmask token validation ──────────────────
+          -- Working hours: Mon–Fri 08:00–18:00 UTC
+          local utc_hour    = tonumber(os.date("!%H"))
+          local utc_weekday = tonumber(os.date("!%w"))  -- 0=Sun, 6=Sat
+          local in_working_hours = (
+              utc_weekday >= 1 and utc_weekday <= 5 and
+              utc_hour >= 8 and utc_hour < 18
+          )
+
+          local initiated_by = kong.request.get_header("X-Initiated-By") or "customer"
+          local session_type = kong.request.get_header("X-Session-Type") or "normal"
+
+          -- Validate unmask token against governance-service
+          local unmask_token  = kong.request.get_header("X-Unmask-Token")
+          local unmask_valid  = false
+          local unmask_fields = {}
+          local unmask_reason = nil
+          local httpc_gov = http.new()
+          httpc_gov:set_timeout(3000)
+
+          if unmask_token and unmask_token ~= "" and customer_id ~= "" then
+              local gov_res, gov_err = httpc_gov:request_uri(
+                  GOVERNANCE_URL .. "/unmask/validate/" .. unmask_token
+                  .. "?customer_id=" .. ngx.escape_uri(customer_id),
+                  { method = "GET" }
+              )
+              if gov_res and gov_res.status == 200 then
+                  local gov_data = cjson.decode(gov_res.body)
+                  if gov_data and gov_data.valid then
+                      unmask_valid  = true
+                      unmask_fields = gov_data.fields or {}
+                      unmask_reason = gov_data.reason_code
+                      kong.log.info("Unmask token valid: user=", claims.preferred_username,
+                                    " customer=", customer_id, " reason=", unmask_reason)
+                  end
+              else
+                  kong.log.warn("Unmask token check: ",
+                               gov_err or (gov_res and tostring(gov_res.status) or "no response"))
+              end
+          end
+          kong.ctx.shared.unmask_token_used  = unmask_valid and unmask_token or nil
+          kong.ctx.shared.unmask_reason_code = unmask_reason
+
+          -- ── 6. OPA policy check ───────────────────────────────────────────
           local httpc = http.new()
           httpc:set_timeout(5000)
 
@@ -379,6 +444,18 @@ plugins:
                       method      = kong.request.get_method(),
                       customer_id = customer_id,
                       backend     = backend,
+                      ctx = {
+                          in_working_hours = in_working_hours,
+                          hour             = utc_hour,
+                          day_of_week      = utc_weekday,
+                          initiated_by     = initiated_by,
+                          session_type     = session_type,
+                      },
+                      unmask = {
+                          valid       = unmask_valid,
+                          fields      = unmask_fields,
+                          reason_code = unmask_reason or cjson.null,
+                      },
                   }
               }),
           })
@@ -425,7 +502,7 @@ plugins:
               " fields_to_mask=", tostring(#(policy.masked_fields or {}))
           )
 
-          -- ── 6. VIP: mandatory X-Access-Reference + real-time alert ────────
+          -- ── 7. VIP: mandatory X-Access-Reference + real-time alert ────────
           if policy.is_vip then
               local access_ref = kong.request.get_header("X-Access-Reference")
               if not access_ref or access_ref == "" then
@@ -461,7 +538,7 @@ plugins:
                             " customer=", customer_id, " ref=", access_ref)
           end
 
-          -- ── 7. Unmask path: X-Unmask-Reason required, rewrite upstream ────
+          -- ── 8. Unmask path: X-Unmask-Reason required, rewrite upstream ────
           if req_path:match("^/api/unmask/") then
               local reason = kong.request.get_header("X-Unmask-Reason")
               if not reason or reason == "" then

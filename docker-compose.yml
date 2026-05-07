@@ -136,6 +136,7 @@ services:
       KONG_UNTRUSTED_LUA: "on"
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KEYCLOAK_REALM: "demo"
+      GOVERNANCE_INTERNAL_URL: "http://governance-service:8889"
     volumes:
       - ./kong:/kong
     ports:
@@ -149,6 +150,8 @@ services:
       opa:
         condition: service_started
       admin-service:
+        condition: service_healthy
+      governance-service:
         condition: service_healthy
     restart: on-failure
 

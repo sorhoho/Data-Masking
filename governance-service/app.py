@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -21,6 +22,20 @@ DATABASE_URL          = os.environ.get("DATABASE_URL", "postgresql://adminuser:a
 ADMIN_USER            = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS            = os.environ.get("ADMIN_PASSWORD", "admin123")
 LOG_DASHBOARD_URL     = os.environ.get("LOG_DASHBOARD_URL", "http://log-dashboard:9000/log")
+
+UNMASK_REASON_CODES = [
+    "FRAUD_INVESTIGATION",
+    "COMPLIANCE_AUDIT",
+    "LEGAL_HOLD",
+    "CUSTOMER_DISPUTE",
+    "TECHNICAL_ESCALATION",
+    "REGULATOR_REQUEST",
+]
+
+UNMASK_FIELDS = [
+    "name", "msisdn", "email", "national_id", "address",
+    "last_call_duration", "data_roaming_gb", "last_location",
+]
 
 GOVERNED_ROLES = [
     # Legacy
@@ -119,6 +134,22 @@ def init_db():
             reason     TEXT DEFAULT '',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(role_a, role_b)
+        )""",
+        """CREATE TABLE IF NOT EXISTS unmask_sessions (
+            id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id      VARCHAR(255) NOT NULL,
+            username     VARCHAR(255) NOT NULL,
+            customer_id  VARCHAR(255) NOT NULL,
+            fields       JSONB        NOT NULL DEFAULT '[]',
+            reason_code  VARCHAR(100) NOT NULL,
+            ticket_ref   VARCHAR(255) DEFAULT '',
+            notes        TEXT         DEFAULT '',
+            status       VARCHAR(50)  NOT NULL DEFAULT 'pending',
+            requested_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            reviewed_at  TIMESTAMPTZ,
+            reviewed_by  VARCHAR(255),
+            expires_at   TIMESTAMPTZ,
+            first_used_at TIMESTAMPTZ
         )""",
     ]
     for stmt in stmts:
@@ -647,6 +678,134 @@ def review_apply(campaign_id):
     flash(msg, "success" if not errors else "warning")
     log_event("access_review_completed", {"campaign_id": campaign_id, "revoked": revoked})
     return redirect(url_for("reviews_list"))
+
+
+# ── Approval-based Unmask Sessions ───────────────────────────────────────────
+
+@app.get("/unmask")
+@login_required
+def unmask_list():
+    status_filter = request.args.get("status", "pending")
+    conn  = get_db()
+    rows  = qrows(conn,
+        "SELECT * FROM unmask_sessions WHERE status=%s ORDER BY requested_at DESC",
+        (status_filter,))
+    conn.close()
+    try:
+        kc_users = kc_get_users()
+    except Exception:
+        kc_users = []
+    return render_template("unmask.html", rows=rows, status=status_filter,
+                           kc_users=kc_users, reason_codes=UNMASK_REASON_CODES,
+                           unmask_fields=UNMASK_FIELDS)
+
+
+@app.post("/unmask/request")
+@login_required
+def unmask_request():
+    user_id     = request.form["user_id"]
+    username    = request.form["username"]
+    customer_id = request.form["customer_id"]
+    reason_code = request.form["reason_code"]
+    ticket_ref  = request.form.get("ticket_ref", "").strip()
+    notes       = request.form.get("notes", "").strip()
+    fields      = request.form.getlist("fields")  # list of field names
+
+    import json as _json
+    conn = get_db()
+    execute(conn,
+        """INSERT INTO unmask_sessions
+           (user_id, username, customer_id, fields, reason_code, ticket_ref, notes)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (user_id, username, customer_id, _json.dumps(fields),
+         reason_code, ticket_ref, notes))
+    conn.commit()
+    conn.close()
+    log_event("unmask_requested",
+              {"username": username, "customer_id": customer_id,
+               "reason_code": reason_code, "ticket_ref": ticket_ref})
+    flash(f"Unmask request submitted for customer {customer_id} — pending approval", "success")
+    return redirect(url_for("unmask_list"))
+
+
+@app.post("/unmask/<token_id>/approve")
+@login_required
+def unmask_approve(token_id):
+    conn = get_db()
+    row  = qone(conn, "SELECT * FROM unmask_sessions WHERE id=%s", (token_id,))
+    if not row or row["status"] != "pending":
+        conn.close()
+        flash("Session not found or not pending", "danger")
+        return redirect(url_for("unmask_list"))
+    execute(conn,
+        """UPDATE unmask_sessions
+           SET status='approved', reviewed_at=NOW(), reviewed_by=%s,
+               expires_at=NOW() + INTERVAL '2 hours'
+           WHERE id=%s""",
+        (ADMIN_USER, token_id))
+    conn.commit()
+    conn.close()
+    log_event("unmask_approved",
+              {"token": token_id, "customer_id": row["customer_id"],
+               "username": row["username"], "reason_code": row["reason_code"]})
+    flash(f"Unmask session approved — valid for 2 hours (token: {token_id})", "success")
+    return redirect(url_for("unmask_list", status="approved"))
+
+
+@app.post("/unmask/<token_id>/reject")
+@login_required
+def unmask_reject(token_id):
+    conn = get_db()
+    row  = qone(conn, "SELECT username, customer_id FROM unmask_sessions WHERE id=%s", (token_id,))
+    execute(conn,
+        "UPDATE unmask_sessions SET status='rejected', reviewed_at=NOW(), reviewed_by=%s WHERE id=%s",
+        (ADMIN_USER, token_id))
+    conn.commit()
+    conn.close()
+    if row:
+        log_event("unmask_rejected",
+                  {"token": token_id, "customer_id": row["customer_id"],
+                   "username": row["username"]})
+    flash("Unmask request rejected", "warning")
+    return redirect(url_for("unmask_list"))
+
+
+@app.get("/unmask/validate/<token_id>")
+def unmask_validate(token_id):
+    """Kong calls this to check whether an unmask token is valid for the given customer."""
+    customer_id = request.args.get("customer_id", "")
+    conn = get_db()
+    row = qone(conn,
+        """SELECT * FROM unmask_sessions
+           WHERE id=%s AND status='approved'
+             AND expires_at > NOW()
+             AND customer_id=%s""",
+        (token_id, customer_id))
+    if not row:
+        conn.close()
+        return jsonify({"valid": False})
+
+    # Record first use timestamp
+    if not row.get("first_used_at"):
+        execute(conn,
+            "UPDATE unmask_sessions SET first_used_at=NOW() WHERE id=%s",
+            (token_id,))
+        conn.commit()
+    conn.close()
+
+    import json as _json
+    fields = row["fields"] if isinstance(row["fields"], list) else _json.loads(row["fields"] or "[]")
+    log_event("unmask_token_used",
+              {"token": token_id, "customer_id": customer_id,
+               "username": row["username"], "reason_code": row["reason_code"],
+               "fields": fields})
+    return jsonify({
+        "valid":       True,
+        "fields":      fields,
+        "reason_code": row["reason_code"],
+        "username":    row["username"],
+        "expires_at":  row["expires_at"].isoformat() if row["expires_at"] else None,
+    })
 
 
 # ── Expiry background worker ──────────────────────────────────────────────────
