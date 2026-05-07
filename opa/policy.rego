@@ -30,30 +30,30 @@ default role_masked_fields := {
     "care_supervisor": ["national_id", "last_location"],
 
     # ── Technical Operations ──────────────────────────────────────────────────
-    "noc_operator":    ["name", "email", "national_id", "address", "last_call_duration"],
-    "field_technician":["email", "national_id", "last_call_duration", "data_roaming_gb"],
-    "roaming_ops":     ["name", "email", "national_id", "address", "last_call_duration"],
+    "noc_operator":     ["name", "email", "national_id", "address", "last_call_duration"],
+    "field_technician": ["email", "national_id", "last_call_duration", "data_roaming_gb"],
+    "roaming_ops":      ["name", "email", "national_id", "address", "last_call_duration"],
 
     # ── Business Operations ───────────────────────────────────────────────────
-    "billing_agent":   ["email", "national_id", "address", "last_location"],
-    "fraud_analyst":   [],
+    "billing_agent":      ["email", "national_id", "address", "last_location"],
+    "fraud_analyst":      [],
     "compliance_officer": [],
 
     # ── Audit ─────────────────────────────────────────────────────────────────
-    "audit_viewer":    ["name", "msisdn", "email", "national_id", "address",
-                        "last_call_duration", "data_roaming_gb", "last_location"],
+    "audit_viewer": ["name", "msisdn", "email", "national_id", "address",
+                     "last_call_duration", "data_roaming_gb", "last_location"],
 
     # ── VIP & Premium ─────────────────────────────────────────────────────────
-    "vip_care":        [],
+    "vip_care": [],
 
     # ── External Partners ─────────────────────────────────────────────────────
-    "b2b_partner":     ["msisdn", "email", "national_id", "address",
-                        "last_call_duration", "data_roaming_gb", "last_location"],
-    "mvno_partner":    ["name", "email", "national_id", "address",
-                        "last_call_duration", "last_location"],
+    "b2b_partner":  ["msisdn", "email", "national_id", "address",
+                     "last_call_duration", "data_roaming_gb", "last_location"],
+    "mvno_partner": ["name", "email", "national_id", "address",
+                     "last_call_duration", "last_location"],
 
     # ── Administration ────────────────────────────────────────────────────────
-    "data_admin":      [],
+    "data_admin": [],
 }
 
 backend_fields := f if {
@@ -120,16 +120,14 @@ _ctx_initiated_by := input.ctx.initiated_by if {
 # ── Context-driven extra masking ──────────────────────────────────────────────
 
 # Out-of-hours: tighten email + address for first-line care and billing roles.
-# These roles handle customer contact; without supervision oversight after hours
-# the risk of misuse is elevated.
 _oooh_extra contains f if {
     not _ctx_in_working_hours
     {"care_l1", "care_l2", "billing_agent"}[input.role]
     f := ["email", "address"][_]
 }
 
-# Agent-initiated query: care_l2 must not see MSISDN when the agent pulled the
-# record without a customer-initiated event (reduces unsolicited lookup risk).
+# Agent-initiated query: care_l2 must not see MSISDN when agent pulled
+# the record without a customer-initiated event.
 _agent_extra contains "msisdn" if {
     _ctx_initiated_by == "agent"
     input.role == "care_l2"
@@ -142,9 +140,8 @@ _token_unmasked contains f if {
     f := input.unmask.fields[_]
 }
 
-# ── Combined masked fields (role + context - token) ───────────────────────────
+# ── Combined masked fields (role + context extras - token unlocks) ────────────
 
-# Convert the role's array to a set for set arithmetic
 _role_masked contains f if {
     f := role_masked_fields[input.role][_]
 }
@@ -164,17 +161,21 @@ _effective_masked contains f if {
     not _token_unmasked[f]
 }
 
+# Convert the effective set to an array (separate rule avoids inline
+# comprehension in else clause which OPA v1 may not evaluate correctly).
+_effective_masked_array := [f | _effective_masked[f]]
+
 # ── Masked fields ─────────────────────────────────────────────────────────────
 
 masked_fields := [] if {
     startswith(input.path, "/api/unmask")
-} else := [f | _effective_masked[f]]
+} else := _effective_masked_array
 
 # ── Decision entry point ──────────────────────────────────────────────────────
 
 decision := {
-    "allow":         allow,
-    "is_vip":        is_vip,
-    "masked_fields": masked_fields,
+    "allow":          allow,
+    "is_vip":         is_vip,
+    "masked_fields":  masked_fields,
     "backend_fields": backend_fields,
 }

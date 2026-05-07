@@ -12,12 +12,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
 
   # ── Identity Provider ─────────────────────────────────────────────────────
   keycloak:
@@ -39,8 +33,7 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
@@ -48,28 +41,15 @@ services:
     ports:
       - "8181:8181"
     depends_on:
-      admin-service:
-        condition: service_healthy
+      - admin-service
 
   # ── Mock CRM Backend ──────────────────────────────────────────────────────
   crm-mock:
     build: ./crm-mock
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
 
   # ── Mock Billing Backend ──────────────────────────────────────────────────
   billing-mock:
     build: ./billing-mock
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
 
   # ── Admin GUI (policy + VIP configuration) ───────────────────────────────
   admin-service:
@@ -83,14 +63,7 @@ services:
       DATABASE_URL: "postgresql://adminuser:admin_pass@postgres:5432/admindb"
       SECRET_KEY: "admin-secret-change-in-production"
     depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 15
-      start_period: 20s
+      - postgres
 
   # ── Identity Governance ───────────────────────────────────────────────────
   governance-service:
@@ -107,16 +80,8 @@ services:
       ADMIN_PASSWORD: "admin123"
       SECRET_KEY: "governance-secret-change-in-production"
     depends_on:
-      postgres:
-        condition: service_healthy
-      keycloak:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8889/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
+      - postgres
+      - keycloak
     restart: on-failure
 
   # ── API Gateway (Kong) ────────────────────────────────────────────────────
@@ -143,16 +108,11 @@ services:
       - "8000:8000"
       - "8001:8001"
     depends_on:
-      crm-mock:
-        condition: service_healthy
-      billing-mock:
-        condition: service_healthy
-      opa:
-        condition: service_started
-      admin-service:
-        condition: service_healthy
-      governance-service:
-        condition: service_healthy
+      - crm-mock
+      - billing-mock
+      - opa
+      - admin-service
+      - governance-service
     restart: on-failure
 
   # ── Customer-Agent Website ────────────────────────────────────────────────
@@ -166,10 +126,8 @@ services:
       KONG_URL: "http://kong:8000"
       SECRET_KEY: "demo-secret-change-in-production"
     depends_on:
-      kong:
-        condition: service_started
-      keycloak:
-        condition: service_started
+      - kong
+      - keycloak
     restart: on-failure
 
 networks:
