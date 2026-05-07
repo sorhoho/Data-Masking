@@ -1,4 +1,4 @@
-FROM openpolicyagent/opa:1.16.1-debug
+FROM openpolicyagent/opa:v1.4.2-debug
 
 COPY policy.rego      /policies/policy.rego
 COPY opa-config.yaml  /policies/opa-config.yaml
