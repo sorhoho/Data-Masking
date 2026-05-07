@@ -1,14 +1,18 @@
 package data_masking
 
+import rego.v1
+
 # ── Bundle data (safe fallbacks when bundle not yet loaded) ───────────────────
 
-vip_customers = c {
-    c := data.masking_config.vip_customers
-} else = {}
+vip_customers := data.masking_config.vip_customers if {
+    data.masking_config.vip_customers
+}
+default vip_customers := {}
 
-role_masked_fields = f {
-    f := data.masking_config.role_masked_fields
-} else = {
+role_masked_fields := data.masking_config.role_masked_fields if {
+    data.masking_config.role_masked_fields
+}
+default role_masked_fields := {
     # ── Legacy roles ──────────────────────────────────────────────────────────
     "agent":      ["name", "msisdn", "email", "national_id", "address",
                    "last_call_duration", "data_roaming_gb", "last_location"],
@@ -52,49 +56,49 @@ role_masked_fields = f {
     "data_admin": [],
 }
 
-backend_fields = f {
+backend_fields := f if {
     f := data.masking_config.backends[input.backend]
 }
-default backend_fields = {}
+default backend_fields := {}
 
 # ── VIP flag ──────────────────────────────────────────────────────────────────
 
-default is_vip = false
-is_vip = true { vip_customers[input.customer_id] }
+is_vip := true if { vip_customers[input.customer_id] }
+default is_vip := false
 
 # ── Role classification sets ──────────────────────────────────────────────────
 
-standard_roles = {
+standard_roles := {
     "agent", "supervisor",
     "care_l1", "care_l2", "care_supervisor",
     "noc_operator", "field_technician", "roaming_ops",
     "billing_agent", "audit_viewer",
 }
 
-privileged_roles = {
+privileged_roles := {
     "vip_agent", "admin",
     "fraud_analyst", "compliance_officer", "vip_care", "data_admin",
 }
 
-partner_roles = {
+partner_roles := {
     "partner",
     "b2b_partner", "mvno_partner",
 }
 
 # ── Access decision ───────────────────────────────────────────────────────────
 
-default allow = false
+default allow := false
 
-allow {
+allow if {
     standard_roles[input.role]
     not vip_customers[input.customer_id]
 }
 
-allow {
+allow if {
     privileged_roles[input.role]
 }
 
-allow {
+allow if {
     partner_roles[input.role]
     not vip_customers[input.customer_id]
     not startswith(input.path, "/api/unmask")
@@ -102,21 +106,17 @@ allow {
 
 # ── Masked fields ─────────────────────────────────────────────────────────────
 
-masked_fields = [] {
+masked_fields := [] if {
     startswith(input.path, "/api/unmask")
-} else = fields {
+} else := fields if {
     fields := role_masked_fields[input.role]
-} else = []
+} else := []
 
 # ── Decision entry point ──────────────────────────────────────────────────────
 
-default decision = {"allow": false, "is_vip": false, "masked_fields": [], "backend_fields": {}}
-
-decision = d {
-    d = {
-        "allow":          allow,
-        "is_vip":         is_vip,
-        "masked_fields":  masked_fields,
-        "backend_fields": backend_fields,
-    }
+decision := {
+    "allow":          allow,
+    "is_vip":         is_vip,
+    "masked_fields":  masked_fields,
+    "backend_fields": backend_fields,
 }
