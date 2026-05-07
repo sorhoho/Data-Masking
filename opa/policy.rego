@@ -110,9 +110,13 @@ masked_fields = [] {
 
 # ── Decision entry point ──────────────────────────────────────────────────────
 
-decision = {
-    "allow":          allow,
-    "is_vip":         is_vip,
-    "masked_fields":  masked_fields,
-    "backend_fields": backend_fields,
+default decision = {"allow": false, "is_vip": false, "masked_fields": [], "backend_fields": {}}
+
+decision = d {
+    d = {
+        "allow":          allow,
+        "is_vip":         is_vip,
+        "masked_fields":  masked_fields,
+        "backend_fields": backend_fields,
+    }
 }
