@@ -525,7 +525,7 @@ def apps_list():
     conn.close()
     app_role_map = {}
     for row in app_role_rows:
-        app_role_map.setdefault(row["app_id"], set()).add(row["role"])
+        app_role_map.setdefault(row["app_id"], []).append(row["role"])
     return render_template("apps.html", apps=apps, app_role_map=app_role_map, roles=ROLES)
 
 
