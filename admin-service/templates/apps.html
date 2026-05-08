@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Applications – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128196; Application Registry</h4>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card border-dark text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-dark">{{ apps | length }}</div>
+      <div class="small text-muted">Registered Apps</div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-primary text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-primary">{{ app_role_map.values() | sum(start=[]) | list | length }}</div>
+      <div class="small text-muted">Total Role Grants</div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-success text-center py-3 shadow-sm">
+      <div class="fs-4 fw-bold text-success">{{ roles | length }}</div>
+      <div class="small text-muted">Available Roles</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+
+  {# ── Register new app ─────────────────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">&#43; Register Application</div>
+      <div class="card-body">
+        <form method="post" action="/apps/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="app_id">App ID</label>
+            <input id="app_id" name="app_id" type="text" class="form-control"
+                   placeholder="e.g. crm, billing, analytics" required autofocus />
+            <div class="form-text">Lowercase, used as OPA backend key</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="name">Display Name</label>
+            <input id="name" name="name" type="text" class="form-control"
+                   placeholder="e.g. CRM System" required />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="upstream_url">Upstream URL <span class="text-muted">(optional)</span></label>
+            <input id="upstream_url" name="upstream_url" type="text" class="form-control"
+                   placeholder="http://service:port" />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="description">Description <span class="text-muted">(optional)</span></label>
+            <input id="description" name="description" type="text" class="form-control"
+                   placeholder="What this app does" />
+          </div>
+          <button class="btn btn-dark w-100" type="submit">Register App</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="alert alert-secondary mt-3 small">
+      <strong>How it works:</strong>
+      OPA checks <code>app_roles</code> from the bundle against <code>input.backend</code>
+      sent by Kong. If a role is not in the allowed list for that app, access is denied
+      even if the customer tier allows it. Apps not registered here default to open access.
+    </div>
+  </div>
+
+  {# ── App list with role matrix ─────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    {% if apps %}
+      {% for a in apps %}
+      {% set granted = app_role_map.get(a['app_id'], set()) %}
+      <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <div>
+            <span class="fw-bold">{{ a['name'] }}</span>
+            <code class="ms-2 text-muted small">{{ a['app_id'] }}</code>
+            {% if a['upstream_url'] %}
+            <span class="ms-2 badge bg-light text-dark border small">{{ a['upstream_url'] }}</span>
+            {% endif %}
+          </div>
+          <form method="post" action="/apps/remove/{{ a['app_id'] }}"
+                onsubmit="return confirm('Remove {{ a['app_id'] }}? This revokes all role grants for this app.')">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+          </form>
+        </div>
+        <div class="card-body">
+          {% if a['description'] %}
+          <p class="text-muted small mb-3">{{ a['description'] }}</p>
+          {% endif %}
+
+          <form method="post" action="/apps/{{ a['app_id'] }}/roles/save">
+            <div class="mb-2 fw-semibold small text-uppercase text-muted">Allowed Roles</div>
+            <div class="row g-1 mb-3">
+              {% for role in roles %}
+              <div class="col-6 col-md-4 col-lg-3">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox"
+                         name="role__{{ role }}" id="{{ a['app_id'] }}_{{ role }}"
+                         {% if role in granted %}checked{% endif %} />
+                  <label class="form-check-label small" for="{{ a['app_id'] }}_{{ role }}">
+                    {{ role }}
+                  </label>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            <div class="d-flex justify-content-between align-items-center">
+              <span class="small text-muted">{{ granted | length }} role(s) granted</span>
+              <button class="btn btn-sm btn-dark" type="submit">Save Roles &amp; Sync OPA</button>
+            </div>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="card border-0 shadow-sm">
+        <div class="card-body text-muted">
+          No applications registered yet. Add one to start enforcing role-based app access.
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}

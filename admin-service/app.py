@@ -21,6 +21,11 @@ ADMIN_PASS   = os.environ.get("ADMIN_PASSWORD", "admin123")
 DATABASE_URL = os.environ.get("DATABASE_URL",
                "postgresql://adminuser:admin_pass@postgres:5432/admindb")
 
+KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
+KEYCLOAK_REALM        = os.environ.get("KEYCLOAK_REALM",         "demo")
+KEYCLOAK_ADMIN_USER   = os.environ.get("KEYCLOAK_ADMIN_USER",    "admin")
+KEYCLOAK_ADMIN_PASS   = os.environ.get("KEYCLOAK_ADMIN_PASSWORD", "admin")
+
 # Ordered list of (field, classification) — drives both DB and UI
 FIELDS = [
     ("name",               "L1"),
@@ -102,6 +107,7 @@ _DEFAULT_MASKS = [
     ("mvno_partner", "last_call_duration"), ("mvno_partner", "last_location"),
     # fraud_analyst, compliance_officer, vip_care, data_admin: nothing masked
 ]
+
 _DEFAULT_TIERS = [
     ("C001", "vip",  "Initial VIP – seeded on first run"),
     ("C004", "vip",  "Initial VIP – seeded on first run"),
@@ -131,6 +137,27 @@ _DEFAULT_FIELD_MAPPINGS = [
     ("billing", "roaming_gb",       "data_roaming_gb",    "L2"),
 ]
 
+_DEFAULT_APPS = [
+    ("crm",     "CRM System",      "http://crm-mock:5000",     "Main CRM backend"),
+    ("billing", "Billing System",  "http://billing-mock:5001", "Billing backend"),
+]
+
+# Roles allowed per app by default — matches existing policy intent
+_DEFAULT_APP_ROLES = [
+    # CRM: all internal roles (partners excluded from unmask paths by policy)
+    ("crm", "agent"), ("crm", "supervisor"), ("crm", "vip_agent"), ("crm", "admin"),
+    ("crm", "care_l1"), ("crm", "care_l2"), ("crm", "care_supervisor"),
+    ("crm", "noc_operator"), ("crm", "field_technician"), ("crm", "roaming_ops"),
+    ("crm", "billing_agent"), ("crm", "fraud_analyst"), ("crm", "compliance_officer"),
+    ("crm", "audit_viewer"), ("crm", "vip_care"), ("crm", "data_admin"),
+    ("crm", "partner"), ("crm", "b2b_partner"), ("crm", "mvno_partner"),
+    # Billing: financial roles + compliance + audit
+    ("billing", "billing_agent"), ("billing", "admin"), ("billing", "data_admin"),
+    ("billing", "fraud_analyst"), ("billing", "compliance_officer"),
+    ("billing", "audit_viewer"), ("billing", "supervisor"), ("billing", "care_supervisor"),
+    ("billing", "roaming_ops"),
+]
+
 
 # ── Database helpers ──────────────────────────────────────────────────────────
 
@@ -139,21 +166,18 @@ def get_db():
 
 
 def qrows(conn, sql, params=()):
-    """Return list of RealDictRow from a SELECT."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, params)
         return cur.fetchall()
 
 
 def qone(conn, sql, params=()):
-    """Return single RealDictRow or None."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, params)
         return cur.fetchone()
 
 
 def scalar(conn, sql, params=()):
-    """Return first column of first row as a scalar value."""
     with conn.cursor() as cur:
         cur.execute(sql, params)
         row = cur.fetchone()
@@ -214,6 +238,19 @@ def init_db():
             classification  TEXT NOT NULL DEFAULT 'L1',
             UNIQUE(backend_id, backend_field)
         )""",
+        """CREATE TABLE IF NOT EXISTS apps (
+            app_id       TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            upstream_url TEXT DEFAULT '',
+            description  TEXT DEFAULT '',
+            added_by     TEXT DEFAULT 'system',
+            added_at     TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS app_roles (
+            app_id TEXT NOT NULL REFERENCES apps(app_id) ON DELETE CASCADE,
+            role   TEXT NOT NULL,
+            PRIMARY KEY (app_id, role)
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -249,6 +286,16 @@ def init_db():
             "VALUES (%s, %s, %s, %s)",
             _DEFAULT_FIELD_MAPPINGS,
         )
+    if not qone(conn, "SELECT 1 FROM apps LIMIT 1"):
+        executemany(conn,
+            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, 'system', %s)",
+            [(aid, name, url, desc, now) for aid, name, url, desc in _DEFAULT_APPS],
+        )
+        executemany(conn,
+            "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
+            _DEFAULT_APP_ROLES,
+        )
     conn.commit()
     conn.close()
 
@@ -257,11 +304,14 @@ def init_db():
 
 def get_config():
     conn = get_db()
-    tier_rows    = qrows(conn, "SELECT customer_id, tier FROM customer_tiers")
-    mask_rows    = qrows(conn, "SELECT role, field FROM role_field_masks")
-    mapping_rows = qrows(conn,
+    tier_rows     = qrows(conn, "SELECT customer_id, tier FROM customer_tiers")
+    mask_rows     = qrows(conn, "SELECT role, field FROM role_field_masks")
+    mapping_rows  = qrows(conn,
         "SELECT backend_id, backend_field, canonical_field, classification "
         "FROM field_mappings ORDER BY backend_id, backend_field"
+    )
+    app_role_rows = qrows(conn,
+        "SELECT app_id, role FROM app_roles ORDER BY app_id, role"
     )
     conn.close()
 
@@ -282,22 +332,21 @@ def get_config():
             "classification": row["classification"],
         }
 
+    app_roles = {}
+    for row in app_role_rows:
+        app_roles.setdefault(row["app_id"], []).append(row["role"])
+
     return {
         "customer_tiers":     customer_tiers,
         "role_masked_fields": role_masked_fields,
         "backends":           backends,
+        "app_roles":          app_roles,
     }
 
 
-# ── OPA sync (bundle mode: logs the attempt; OPA polls /bundle endpoint) ──────
+# ── OPA sync ──────────────────────────────────────────────────────────────────
 
 def sync_to_opa(retries=3):
-    """
-    In bundle mode OPA polls /bundle/masking_config.tar.gz automatically.
-    This function is kept for the sync_log audit trail and the manual /sync
-    button — it records the attempt but does not PUT to the OPA data API
-    (which would return 400 when a bundle owns that path).
-    """
     status  = "ok"
     message = "bundle mode — OPA polls /bundle/masking_config.tar.gz automatically (≤60s)"
     conn = get_db()
@@ -310,19 +359,13 @@ def sync_to_opa(retries=3):
     return True, message
 
 
-# ── OPA bundle endpoint (Item 9) ──────────────────────────────────────────────
+# ── OPA bundle endpoint ───────────────────────────────────────────────────────
 
 def build_bundle():
-    """Build a gzipped tar bundle containing masking_config/data.json.
-
-    The .manifest scopes the bundle to the 'masking_config' root so OPA 1.x
-    does not claim the entire data namespace, allowing policy.rego (package
-    data_masking) to be loaded from the command-line argument.
-    """
-    config     = get_config()
-    data_bytes = json.dumps(config).encode("utf-8")
+    config         = get_config()
+    data_bytes     = json.dumps(config).encode("utf-8")
     manifest_bytes = json.dumps({"revision": "", "roots": ["masking_config"]}).encode("utf-8")
-    buf        = io.BytesIO()
+    buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         minfo      = tarfile.TarInfo(name=".manifest")
         minfo.size = len(manifest_bytes)
@@ -336,7 +379,6 @@ def build_bundle():
 
 @app.get("/bundle/masking_config.tar.gz")
 def bundle_endpoint():
-    """OPA polls this endpoint for the masking_config bundle."""
     data = build_bundle()
     resp = make_response(data)
     resp.headers["Content-Type"]        = "application/gzip"
@@ -470,6 +512,229 @@ def tier_remove(customer_id):
         "success" if ok else "warning",
     )
     return redirect(url_for("tier_list"))
+
+
+# ── Application registry ──────────────────────────────────────────────────────
+
+@app.get("/apps")
+@login_required
+def apps_list():
+    conn          = get_db()
+    apps          = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
+    app_role_rows = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+    conn.close()
+    app_role_map = {}
+    for row in app_role_rows:
+        app_role_map.setdefault(row["app_id"], set()).add(row["role"])
+    return render_template("apps.html", apps=apps, app_role_map=app_role_map, roles=ROLES)
+
+
+@app.post("/apps/add")
+@login_required
+def app_add():
+    app_id = (request.form.get("app_id")       or "").strip().lower().replace(" ", "_")
+    name   = (request.form.get("name")         or "").strip()
+    url    = (request.form.get("upstream_url") or "").strip()
+    desc   = (request.form.get("description")  or "").strip()
+    if not app_id or not name:
+        flash("App ID and name are required", "danger")
+        return redirect(url_for("apps_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (app_id, name, url, desc, ADMIN_USER, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        flash(f"Application '{app_id}' registered", "success")
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        flash(f"App ID '{app_id}' already exists", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/remove/<app_id>")
+@login_required
+def app_remove(app_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM apps WHERE app_id = %s", (app_id,))
+    conn.commit()
+    conn.close()
+    ok, _ = sync_to_opa()
+    flash(f"Application '{app_id}' removed" + (" – OPA synced ✓" if ok else ""), "success")
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/<app_id>/roles/save")
+@login_required
+def app_roles_save(app_id):
+    selected = [r for r in ROLES if request.form.get(f"role__{r}")]
+    conn     = get_db()
+    execute(conn, "DELETE FROM app_roles WHERE app_id = %s", (app_id,))
+    if selected:
+        executemany(conn,
+            "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
+            [(app_id, r) for r in selected],
+        )
+    conn.commit()
+    conn.close()
+    ok, msg = sync_to_opa()
+    flash(
+        f"Access roles for '{app_id}' updated "
+        + ("– OPA synced ✓" if ok else f"– sync failed: {msg}"),
+        "success" if ok else "warning",
+    )
+    return redirect(url_for("apps_list"))
+
+
+# ── Keycloak Admin API client ─────────────────────────────────────────────────
+
+def kc_admin_token():
+    resp = requests.post(
+        f"{KEYCLOAK_INTERNAL_URL}/realms/master/protocol/openid-connect/token",
+        data={
+            "client_id":  "admin-cli",
+            "grant_type": "password",
+            "username":   KEYCLOAK_ADMIN_USER,
+            "password":   KEYCLOAK_ADMIN_PASS,
+        },
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def _kc(method, path, token, **kwargs):
+    resp = requests.request(
+        method,
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=5,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def kc_get(path, token):
+    return _kc("GET", path, token).json()
+
+
+def kc_post(path, token, payload):
+    return _kc("POST", path, token, json=payload)
+
+
+def kc_put(path, token, payload):
+    return _kc("PUT", path, token, json=payload)
+
+
+def kc_delete(path, token, payload=None):
+    return _kc("DELETE", path, token, json=payload)
+
+
+# ── User lifecycle management ─────────────────────────────────────────────────
+
+@app.get("/users")
+@login_required
+def users_list():
+    users = []
+    error = None
+    try:
+        token     = kc_admin_token()
+        raw_users = kc_get("/users?max=200&briefRepresentation=false", token)
+        known     = set(ROLES)
+        for u in raw_users:
+            try:
+                role_maps    = kc_get(f"/users/{u['id']}/role-mappings/realm", token)
+                u["app_roles"] = [r["name"] for r in role_maps if r["name"] in known]
+            except Exception:
+                u["app_roles"] = []
+            users.append(u)
+    except Exception as exc:
+        error = str(exc)
+    return render_template("users.html", users=users, roles=ROLES, error=error)
+
+
+@app.post("/users/add")
+@login_required
+def user_add():
+    username  = (request.form.get("username")   or "").strip()
+    email     = (request.form.get("email")      or "").strip()
+    first     = (request.form.get("first_name") or "").strip()
+    last      = (request.form.get("last_name")  or "").strip()
+    password  = (request.form.get("password")   or "").strip()
+    role_name = (request.form.get("role")       or "").strip()
+    if not username or not password:
+        flash("Username and password are required", "danger")
+        return redirect(url_for("users_list"))
+    if role_name and role_name not in ROLES:
+        flash(f"Unknown role '{role_name}'", "danger")
+        return redirect(url_for("users_list"))
+    try:
+        token = kc_admin_token()
+        kc_post("/users", token, {
+            "username":    username,
+            "email":       email or None,
+            "firstName":   first or None,
+            "lastName":    last or None,
+            "enabled":     True,
+            "credentials": [{"type": "password", "value": password, "temporary": True}],
+        })
+        if role_name:
+            found = kc_get(f"/users?username={username}&exact=true", token)
+            if found:
+                all_roles = kc_get("/roles", token)
+                role_rep  = next((r for r in all_roles if r["name"] == role_name), None)
+                if role_rep:
+                    kc_post(f"/users/{found[0]['id']}/role-mappings/realm", token, [role_rep])
+        flash(
+            f"User '{username}' created"
+            + (f" with role '{role_name}'" if role_name else "")
+            + " — temporary password set",
+            "success",
+        )
+    except Exception as exc:
+        flash(f"Failed to create user: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/users/<user_id>/roles/save")
+@login_required
+def user_roles_save(user_id):
+    selected = [r for r in ROLES if request.form.get(f"role__{r}")]
+    username = request.form.get("username", user_id)
+    try:
+        token   = kc_admin_token()
+        current = kc_get(f"/users/{user_id}/role-mappings/realm", token)
+        if current:
+            kc_delete(f"/users/{user_id}/role-mappings/realm", token, current)
+        if selected:
+            all_roles = kc_get("/roles", token)
+            role_reps = [r for r in all_roles if r["name"] in selected]
+            kc_post(f"/users/{user_id}/role-mappings/realm", token, role_reps)
+        flash(f"Roles updated for '{username}'", "success")
+    except Exception as exc:
+        flash(f"Failed to update roles: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/users/<user_id>/offboard")
+@login_required
+def user_offboard(user_id):
+    username = request.form.get("username", user_id)
+    try:
+        token = kc_admin_token()
+        kc_put(f"/users/{user_id}", token, {"enabled": False})
+        flash(
+            f"User '{username}' disabled — all active sessions immediately revoked",
+            "success",
+        )
+    except Exception as exc:
+        flash(f"Failed to offboard '{username}': {exc}", "danger")
+    return redirect(url_for("users_list"))
 
 
 # ── Masking rules (role × field matrix) ──────────────────────────────────────
@@ -633,7 +898,6 @@ def api_config():
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Retry DB connection — Postgres may still be initialising
     for i in range(10):
         try:
             init_db()

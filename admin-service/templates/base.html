@@ -36,6 +36,12 @@
         <li class="nav-item">
           <a class="nav-link {% if '/backends' in request.path %}active{% endif %}" href="/backends">&#128268; Backends</a>
         </li>
+        <li class="nav-item">
+          <a class="nav-link {% if '/apps' in request.path %}active{% endif %}" href="/apps">&#128196; Applications</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link {% if '/users' in request.path %}active{% endif %}" href="/users">&#128100; Users</a>
+        </li>
       </ul>
       <div class="d-flex align-items-center gap-3">
         <form method="post" action="/sync" class="d-inline">

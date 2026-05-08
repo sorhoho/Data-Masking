@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Users – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128100; User Lifecycle Management</h4>
+</div>
+
+{% if error %}
+<div class="alert alert-danger">
+  <strong>Keycloak unavailable:</strong> {{ error }}<br>
+  <small>Check that the Keycloak service is running and admin credentials are correct.</small>
+</div>
+{% endif %}
+
+<div class="row g-4">
+
+  {# ── Onboard new user ─────────────────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">&#43; Onboard User</div>
+      <div class="card-body">
+        <form method="post" action="/users/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="username">Username</label>
+            <input id="username" name="username" type="text" class="form-control"
+                   placeholder="e.g. alice.smith" required autofocus />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="email">Email <span class="text-muted">(optional)</span></label>
+            <input id="email" name="email" type="email" class="form-control"
+                   placeholder="alice@example.com" />
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label fw-semibold small" for="first_name">First Name</label>
+              <input id="first_name" name="first_name" type="text" class="form-control" placeholder="Alice" />
+            </div>
+            <div class="col">
+              <label class="form-label fw-semibold small" for="last_name">Last Name</label>
+              <input id="last_name" name="last_name" type="text" class="form-control" placeholder="Smith" />
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="password">Temporary Password</label>
+            <input id="password" name="password" type="password" class="form-control"
+                   placeholder="User must change on first login" required />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small" for="role">Initial Role <span class="text-muted">(optional)</span></label>
+            <select id="role" name="role" class="form-select">
+              <option value="">— no role assigned —</option>
+              {% for role in roles %}
+              <option value="{{ role }}">{{ role }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button class="btn btn-dark w-100" type="submit">Create User in Keycloak</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="alert alert-secondary mt-3 small">
+      <strong>Lifecycle actions:</strong>
+      Users are created directly in Keycloak with a temporary password.
+      Offboarding disables the account and immediately invalidates all active tokens —
+      the user cannot authenticate until re-enabled.
+    </div>
+  </div>
+
+  {# ── User table ───────────────────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span>Keycloak Users <span class="badge bg-dark ms-1">{{ users | length }}</span></span>
+        <small class="text-muted fw-normal">Realm: {{ request.environ.get('KEYCLOAK_REALM', 'demo') }}</small>
+      </div>
+
+      {% if users %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Username</th>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Roles</th>
+              <th class="text-end">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users %}
+            <tr>
+              <td>
+                <code class="fw-bold">{{ u.username }}</code>
+                {% if u.email %}<br><span class="text-muted small">{{ u.email }}</span>{% endif %}
+              </td>
+              <td class="small">
+                {{ u.get('firstName', '') }} {{ u.get('lastName', '') }}
+              </td>
+              <td>
+                {% if u.enabled %}
+                  <span class="badge bg-success">Active</span>
+                {% else %}
+                  <span class="badge bg-secondary">Disabled</span>
+                {% endif %}
+              </td>
+              <td>
+                {% for r in u.app_roles %}
+                  <span class="badge bg-dark me-1 mb-1" style="font-size:.7em">{{ r }}</span>
+                {% else %}
+                  <span class="text-muted small">—</span>
+                {% endfor %}
+              </td>
+              <td class="text-end">
+                <button class="btn btn-sm btn-outline-secondary"
+                        data-bs-toggle="modal"
+                        data-bs-target="#modal-roles-{{ u.id }}">
+                  Roles
+                </button>
+                {% if u.enabled %}
+                <form method="post" action="/users/{{ u.id }}/offboard" class="d-inline"
+                      onsubmit="return confirm('Offboard {{ u.username }}? This disables their account and revokes all sessions immediately.')">
+                  <input type="hidden" name="username" value="{{ u.username }}" />
+                  <button class="btn btn-sm btn-outline-danger" type="submit">Offboard</button>
+                </form>
+                {% else %}
+                <span class="btn btn-sm btn-outline-secondary disabled">Offboarded</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="card-body text-muted">
+          {% if not error %}No users found in Keycloak realm.{% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+{# ── Role modals (one per user) ───────────────────────────────────────────── #}
+{% for u in users %}
+<div class="modal fade" id="modal-roles-{{ u.id }}" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Roles — <code>{{ u.username }}</code></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="/users/{{ u.id }}/roles/save">
+        <input type="hidden" name="username" value="{{ u.username }}" />
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            Select all roles this user should hold. Saving replaces the current role set immediately.
+          </p>
+          <div class="row g-2">
+            {% for role in roles %}
+            <div class="col-6 col-md-4">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox"
+                       name="role__{{ role }}" id="{{ u.id }}_{{ role }}"
+                       {% if role in u.app_roles %}checked{% endif %} />
+                <label class="form-check-label small" for="{{ u.id }}_{{ role }}">
+                  {{ role }}
+                </label>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-dark">Save Roles</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

@@ -103,6 +103,22 @@ premium_access_roles := {
     "field_technician", "audit_viewer",
 }
 
+# ── App registry (from bundle: allowed roles per backend) ────────────────────
+
+app_roles_config := data.masking_config.app_roles if {
+    data.masking_config.app_roles
+}
+default app_roles_config := {}
+
+# Pass if the backend has no registered role list (open), or role is in the list
+app_role_allowed if {
+    input.role in app_roles_config[input.backend]
+}
+app_role_allowed if {
+    not app_roles_config[input.backend]
+}
+default app_role_allowed := false
+
 # ── Access decision ───────────────────────────────────────────────────────────
 
 default allow := false
@@ -230,10 +246,18 @@ masked_fields := [] if {
     startswith(input.path, "/api/unmask")
 } else := [f | _effective_masked[f]]
 
+# ── Effective allow: customer-tier gate AND app-role gate ─────────────────────
+
+effective_allow if {
+    allow
+    app_role_allowed
+}
+default effective_allow := false
+
 # ── Decision entry point ──────────────────────────────────────────────────────
 
 decision := {
-    "allow":          allow,
+    "allow":          effective_allow,
     "is_vip":         is_vip,
     "customer_tier":  customer_tier,
     "masked_fields":  masked_fields,
