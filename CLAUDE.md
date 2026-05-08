@@ -35,18 +35,59 @@ Transform abstract tasks into testable objectives with clear verification steps 
 | Grafana | grafana/grafana:12.4.0 | Log dashboards |
 
 ### Key Files
-- `kong/kong.yml` — Lua pre/post-function plugins: JWT RS256 verification, OPA call, response masking
+- `kong/kong.yml` — Lua pre/post-function plugins: JWT RS256 verification, OPA call, response masking, audit log
 - `opa/policy.rego` — Rego v1 (`import rego.v1`), entry point is `data.data_masking.decision`
 - `opa/opa-config.yaml` — Bundle polling from admin-service every 15–60 s
-- `admin-service/app.py` — Serves `/bundle/masking_config.tar.gz`; manages VIP list + role masks
+- `admin-service/app.py` — Serves `/bundle/masking_config.tar.gz`; manages customer tiers, role masks, app registry, user lifecycle (Keycloak Admin API)
+- `admin-service/templates/` — Flask/Jinja2 UI: dashboard, tiers, roles, backends, apps, users
 - `keycloak/realm-config.json` — Realm `demo`, clients, roles, users
 - `postgres/init.sql` — Creates `admindb` + `adminuser`; must `GRANT ALL ON SCHEMA public`
 - `grafana/loki-config.yaml` — Loki 3.x TSDB config (BoltDB removed in 3.0)
 
 ### OPA Policy Rules
 - Kong queries `/v1/data/data_masking/decision` (not the package root)
-- `decision` is an explicit complete rule — avoids the OPA v1.x behaviour where `default`-only values are absent from package-document query results
-- All sub-rules (`allow`, `is_vip`, `masked_fields`, `backend_fields`) carry `default` values
+- `decision` uses `effective_allow` (not `allow` directly) — combines customer-tier gate AND app-role gate
+- All sub-rules carry `default` values; `decision` is an explicit complete rule (avoids OPA v1.x package-document absence for default-only rules)
+- Bundle `.manifest` must scope roots to `["masking_config"]` — without it OPA 1.x claims the entire `data` namespace and silently prevents `policy.rego` from loading
+- OPA image: `openpolicyagent/opa:1.16.1-debug` — no `--v0-compatible` flag; native `import rego.v1` syntax only
+
+### Customer Tier System (ABAC)
+Four tiers replace the old boolean VIP flag. Tier is looked up from `data.masking_config.customer_tiers[input.customer_id]`; unassigned customers default to `standard`.
+
+| Tier | Who can access |
+|------|---------------|
+| `standard` | All standard + privileged + partner roles |
+| `premium` | care_l2+, supervisors, billing, roaming, audit + all privileged |
+| `vip` | Privileged roles only (vip_agent, admin, fraud_analyst, compliance_officer, vip_care, data_admin) |
+| `risk` | fraud_analyst, compliance_officer, care_supervisor, data_admin, admin only |
+
+VIP access still requires `X-Access-Reference` header (Kong enforces, logs alert).
+
+### Application Registry
+- `apps` table in admin-service DB; role grants stored in `app_roles` table
+- Included in OPA bundle as `data.masking_config.app_roles: {app_id: [roles]}`
+- OPA rule: `app_role_allowed` passes if backend has no registered role list (open) OR `input.role` is in the allowed list
+- `effective_allow = allow AND app_role_allowed`
+- Admin UI at `/apps` — register apps, set allowed roles per app, syncs to OPA bundle
+
+### User Lifecycle (Keycloak Admin API)
+- Admin-service calls Keycloak Admin REST API using `admin-cli` client with master-realm credentials
+- Env vars required: `KEYCLOAK_INTERNAL_URL`, `KEYCLOAK_REALM`, `KEYCLOAK_ADMIN_USER`, `KEYCLOAK_ADMIN_PASSWORD`
+- **Onboard**: POST `/users` → assign initial role via role-mappings API
+- **Role change**: DELETE existing role-mappings + POST new set (atomic replacement)
+- **Offboard**: PUT `/users/{id}` with `{"enabled": false}` — immediately invalidates all active tokens
+- Admin UI at `/users`
+
+### Context Signals (ABAC)
+Kong injects these into `input.ctx` for OPA. All have safe defaults if the header is absent.
+
+| Header | OPA field | Default | Effect when set |
+|--------|-----------|---------|-----------------|
+| *(time-based)* | `in_working_hours` | `true` | care_l1/l2/billing_agent see less contact data out-of-hours |
+| `X-Initiated-By` | `initiated_by` | `"customer"` | `"agent"` → care_l2 loses MSISDN visibility |
+| `X-Channel` | `channel` | `"web"` | `"ivr"` → agent role masks name |
+| `X-Session-Type` | `session_type` | `"normal"` | `"readonly"` → billing/care_l2 mask account_balance + bill_amount |
+| `X-Purpose` | `purpose` | `""` | Logged in audit; no masking effect yet |
 
 ### JWT Verification (Kong Lua)
 - JWKS fetched from `KEYCLOAK_INTERNAL_URL` (internal Docker URL, never the public URL)
@@ -54,14 +95,26 @@ Transform abstract tasks into testable objectives with clear verification steps 
 - Key loaded from `jwk.x5c[1]` (DER cert) to avoid OpenSSL 3.x JWK-alg constraint (`error:1C880004`)
 - Signature verified via `resty.openssl.pkey:verify()` — bypasses lua-resty-jwt's OpenSSL 3.x incompatibility
 
-### Roles & Masking
-| Role | Masked fields | VIP access |
-|------|--------------|------------|
-| agent | name, msisdn, email, national_id, address, L2 fields | No |
-| supervisor | msisdn, national_id | No |
-| vip_agent | none | Yes (X-Access-Reference required) |
-| admin | none | Yes |
-| partner | same as agent | No |
+### Roles & Masking (summary)
+Full matrix managed in admin-service UI at `/roles`. Key role groups:
+
+| Group | Roles | Default masked fields |
+|-------|-------|-----------------------|
+| Privileged | vip_agent, admin, fraud_analyst, compliance_officer, vip_care, data_admin | none |
+| Care | care_l1, care_l2, care_supervisor | decreasing set from L1→supervisor |
+| Standard | agent, supervisor, billing_agent, noc_operator, field_technician, roaming_ops, audit_viewer | role-specific subsets |
+| Partners | partner, b2b_partner, mvno_partner | most PII fields; standard tier only |
+
+### Admin-service DB Tables
+| Table | Purpose |
+|-------|---------|
+| `customer_tiers` | customer_id → tier (vip/premium/risk/standard) |
+| `role_field_masks` | role × field pairs that should be masked |
+| `backends` | backend registry (id, name, url) |
+| `field_mappings` | backend field → canonical field alias mapping |
+| `apps` | registered applications (id, name, upstream_url) |
+| `app_roles` | app_id × role — which roles may access each app |
+| `sync_log` | audit trail of OPA bundle sync events |
 
 ### Development Branch
 Always develop on `claude/keycloak-kong-integration-yIVJ1` and push there.
