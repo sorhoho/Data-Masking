@@ -15,12 +15,12 @@
   <div class="col">
     <div class="card border-0 shadow-sm h-100">
       <div class="card-body text-center py-4">
-        <div class="fs-1 text-danger">&#128081;</div>
-        <div class="display-6 fw-bold">{{ config.vip_customers | length }}</div>
-        <div class="text-muted small">VIP Customers</div>
+        <div class="fs-1 text-danger">&#127959;</div>
+        <div class="display-6 fw-bold">{{ config.customer_tiers | length }}</div>
+        <div class="text-muted small">Tiered Customers</div>
       </div>
       <div class="card-footer bg-transparent text-center">
-        <a href="/vip" class="btn btn-sm btn-outline-danger">Manage</a>
+        <a href="/tiers" class="btn btn-sm btn-outline-danger">Manage</a>
       </div>
     </div>
   </div>
@@ -141,20 +141,23 @@
   </div>
 
   <div class="col-lg-4">
-    {# VIP list #}
+    {# Customer tiers summary #}
     <div class="card border-0 shadow-sm mb-3">
-      <div class="card-header fw-bold">&#128081; VIP Customers</div>
+      <div class="card-header fw-bold">&#127959; Customer Tiers</div>
       <div class="card-body">
-        {% if config.vip_customers %}
-          {% for cid in config.vip_customers %}
-            <span class="badge bg-danger me-1 mb-1 p-2 fs-6">{{ cid }}</span>
+        {% set tier_colors = {'vip': 'danger', 'premium': 'primary', 'risk': 'warning', 'standard': 'secondary'} %}
+        {% if config.customer_tiers %}
+          {% for cid, tier in config.customer_tiers.items() %}
+            <span class="badge bg-{{ tier_colors.get(tier, 'secondary') }} me-1 mb-1 p-2">
+              {{ cid }} <span class="opacity-75">{{ tier }}</span>
+            </span>
           {% endfor %}
         {% else %}
-          <span class="text-muted small">No VIP customers configured</span>
+          <span class="text-muted small">No tier assignments — all customers are Standard</span>
         {% endif %}
       </div>
       <div class="card-footer text-end">
-        <a href="/vip" class="btn btn-sm btn-outline-danger">Manage VIP</a>
+        <a href="/tiers" class="btn btn-sm btn-outline-danger">Manage Tiers</a>
       </div>
     </div>
 
@@ -189,7 +192,7 @@
     <a href="/api/config" target="_blank" class="btn btn-sm btn-outline-secondary">JSON</a>
   </div>
   <div class="card-body">
-    <pre class="bg-light rounded p-3 mb-0 small"><code>VIP customers : {{ config.vip_customers.keys() | list | join(', ') or '(none)' }}
+    <pre class="bg-light rounded p-3 mb-0 small"><code>Customer tiers: {{ config.customer_tiers | length }} assigned ({{ config.customer_tiers.values() | list | join(', ') or 'none' }})
 
 Masking rules :
 {% for role in roles %}  {{ "%-12s"|format(role) }} → {{ config.role_masked_fields.get(role, []) | join(', ') or '(no masking)' }}
