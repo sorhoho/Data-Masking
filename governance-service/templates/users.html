@@ -2,17 +2,29 @@
 {% block title %}Users – Identity Governance{% endblock %}
 {% block content %}
 
-<div class="page-hdr">
-  <h4>Users &amp; Role Assignments</h4>
-  <p class="sub">Manage user roles and initiate lifecycle actions</p>
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Users &amp; Role Assignments</h4>
+    <p class="sub">Manage user roles and initiate lifecycle actions</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#onboardModal">
+    <i class="bi bi-person-plus-fill me-1"></i> Onboard user
+  </button>
 </div>
+
+{% if error %}
+<div class="alert alert-danger py-2 mb-3" style="font-size:.83rem;border-radius:4px">
+  <i class="bi bi-exclamation-triangle-fill me-1"></i>
+  <strong>Keycloak unavailable:</strong> {{ error }}
+</div>
+{% endif %}
 
 <div class="ms-card overflow-hidden">
   <table class="ms-tbl">
     <thead>
       <tr>
         <th>User</th>
-        <th>Current governed roles</th>
+        <th>Governed roles</th>
         <th>Actions</th>
       </tr>
     </thead>
@@ -37,26 +49,71 @@
         </td>
         <td>
           {% for role in u.governed_roles %}
-            <span class="chip chip-active me-1">{{ role }}</span>
+            <span class="chip chip-role me-1 mb-1">{{ role }}</span>
           {% else %}
             <span class="text-muted small">no governed roles</span>
           {% endfor %}
         </td>
         <td>
           <div class="d-flex gap-1 flex-wrap">
+            <button class="btn-ms py-1 px-2" style="font-size:.75rem"
+                    data-bs-toggle="modal" data-bs-target="#rolesModal-{{ u.id }}">
+              <i class="bi bi-person-badge-fill me-1"></i>Roles
+            </button>
             <button class="btn-ms-outline py-1 px-2" style="font-size:.75rem"
                     data-bs-toggle="modal" data-bs-target="#changeModal-{{ u.id }}">
-              <i class="bi bi-arrow-left-right me-1"></i>Change role
+              <i class="bi bi-arrow-left-right me-1"></i>Request
             </button>
+            {% if u.enabled != false %}
             <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem"
                     data-bs-toggle="modal" data-bs-target="#offboardModal-{{ u.id }}">
-              <i class="bi bi-person-dash-fill me-1"></i>Offboard
+              <i class="bi bi-person-dash-fill"></i>
             </button>
+            {% endif %}
           </div>
         </td>
       </tr>
 
-      <!-- Change role modal -->
+      <!-- Direct role management modal -->
+      <div class="modal fade" id="rolesModal-{{ u.id }}" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+          <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
+            <form method="post" action="/users/{{ u.id }}/roles/save">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <div class="modal-header" style="border-bottom:1px solid #edebe9">
+                <div class="d-flex align-items-center gap-2">
+                  <div class="avatar">{{ u.username[:2].upper() }}</div>
+                  <h6 class="modal-title fw-semibold mb-0">Manage roles — {{ u.username }}</h6>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+              </div>
+              <div class="modal-body">
+                <p class="small text-muted mb-3">
+                  Select all roles this user should hold. Saving replaces the current role set immediately in Keycloak — no approval required.
+                </p>
+                <div class="row g-2">
+                  {% for role in roles %}
+                  <div class="col-6 col-md-4 col-lg-3">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox"
+                             name="role__{{ role }}" id="{{ u.id }}_{{ role }}"
+                             {% if role in u.governed_roles %}checked{% endif %}>
+                      <label class="form-check-label small" for="{{ u.id }}_{{ role }}">{{ role }}</label>
+                    </div>
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="modal-footer" style="border-top:1px solid #edebe9">
+                <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn-ms">Save roles</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Governance request modal -->
       <div class="modal fade" id="changeModal-{{ u.id }}" tabindex="-1">
         <div class="modal-dialog">
           <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
@@ -64,13 +121,14 @@
               <input type="hidden" name="username" value="{{ u.username }}">
               <input type="hidden" name="email"    value="{{ u.email or '' }}">
               <div class="modal-header" style="border-bottom:1px solid #edebe9">
-                <div class="d-flex align-items-center gap-2">
-                  <div class="avatar">{{ u.username[:2].upper() }}</div>
-                  <h6 class="modal-title fw-semibold mb-0">Role change — {{ u.username }}</h6>
-                </div>
+                <h6 class="modal-title fw-semibold">Role request — {{ u.username }}</h6>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
               </div>
               <div class="modal-body">
+                <div class="alert alert-primary py-2 mb-3" style="font-size:.8rem;border-radius:3px">
+                  <i class="bi bi-info-circle me-1"></i>
+                  Creates a governance request — requires approval before roles change.
+                </div>
                 <div class="row g-2 mb-3">
                   <div class="col">
                     <label class="form-label small fw-semibold">Current role</label>
@@ -85,7 +143,7 @@
                     </select>
                   </div>
                   <div class="col">
-                    <label class="form-label small fw-semibold">New role</label>
+                    <label class="form-label small fw-semibold">Requested role</label>
                     <select class="form-select form-select-sm" name="new_role">
                       <option value="">Select…</option>
                       {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
@@ -124,13 +182,13 @@
               </div>
               <div class="modal-body">
                 <p class="small text-muted mb-2">
-                  Creates an offboarding request. On approval, all governed roles are revoked in Keycloak immediately.
+                  Disables the account in Keycloak immediately — all active sessions revoked. Cannot authenticate until re-enabled.
                 </p>
                 <textarea class="form-control form-control-sm" name="notes" rows="2" placeholder="Reason / ticket #"></textarea>
               </div>
               <div class="modal-footer" style="border-top:1px solid #edebe9">
                 <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
-                <button type="submit" class="btn-ms-danger">Create offboarding request</button>
+                <button type="submit" class="btn-ms-danger">Offboard</button>
               </div>
             </form>
           </div>
@@ -147,6 +205,55 @@
       {% endfor %}
     </tbody>
   </table>
+</div>
+
+<!-- Onboard User Modal -->
+<div class="modal fade" id="onboardModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
+      <form method="post" action="/users/add">
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold"><i class="bi bi-person-plus-fill me-2" style="color:#0078d4"></i>Onboard User</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Username <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm" name="username" placeholder="e.g. alice.smith" required autofocus>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Email <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="email" class="form-control form-control-sm" name="email" placeholder="alice@example.com">
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label small fw-semibold">First name</label>
+              <input class="form-control form-control-sm" name="first_name" placeholder="Alice">
+            </div>
+            <div class="col">
+              <label class="form-label small fw-semibold">Last name</label>
+              <input class="form-control form-control-sm" name="last_name" placeholder="Smith">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Temporary password <span class="text-danger">*</span></label>
+            <input type="password" class="form-control form-control-sm" name="password" placeholder="User must change on first login" required>
+          </div>
+          <div>
+            <label class="form-label small fw-semibold">Initial role <span class="text-muted fw-normal">(optional)</span></label>
+            <select class="form-select form-select-sm" name="role">
+              <option value="">— no role assigned —</option>
+              {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Create in Keycloak</button>
+        </div>
+      </form>
+    </div>
+  </div>
 </div>
 
 {% endblock %}

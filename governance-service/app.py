@@ -297,6 +297,42 @@ def kc_revoke_all_roles(user_id):
     return roles
 
 
+def kc_create_user(username, email, first, last, password):
+    resp = requests.post(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users",
+        headers=kc_headers(), timeout=5,
+        json={
+            "username":    username,
+            "email":       email,
+            "firstName":   first,
+            "lastName":    last,
+            "enabled":     True,
+            "credentials": [{"type": "password", "value": password, "temporary": True}],
+        },
+    )
+    resp.raise_for_status()
+
+
+def kc_find_user(username):
+    resp = requests.get(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users"
+        f"?username={username}&exact=true",
+        headers=kc_headers(), timeout=5,
+    )
+    resp.raise_for_status()
+    found = resp.json()
+    return found[0] if found else None
+
+
+def kc_disable_user(user_id):
+    resp = requests.put(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users/{user_id}",
+        headers=kc_headers(), timeout=5,
+        json={"enabled": False},
+    )
+    resp.raise_for_status()
+
+
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 def log_event(event_type, details):
@@ -494,19 +530,135 @@ def request_reject(req_id):
     return redirect(url_for("requests_list"))
 
 
+# ── Application registry ─────────────────────────────────────────────────────
+
+@app.get("/apps")
+@login_required
+def apps_list():
+    conn          = get_db()
+    apps          = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
+    app_role_rows = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+    conn.close()
+    app_role_map = {}
+    for row in app_role_rows:
+        app_role_map.setdefault(row["app_id"], []).append(row["role"])
+    return render_template("apps.html", apps=apps, app_role_map=app_role_map, roles=GOVERNED_ROLES)
+
+
+@app.post("/apps/add")
+@login_required
+def app_add():
+    app_id = (request.form.get("app_id")       or "").strip().lower().replace(" ", "_")
+    name   = (request.form.get("name")         or "").strip()
+    url    = (request.form.get("upstream_url") or "").strip()
+    desc   = (request.form.get("description")  or "").strip()
+    if not app_id or not name:
+        flash("App ID and name are required", "danger")
+        return redirect(url_for("apps_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, %s, NOW())",
+            (app_id, name, url, desc, ADMIN_USER),
+        )
+        conn.commit()
+        flash(f"Application '{app_id}' registered — OPA will sync within 60 s", "success")
+    except Exception as e:
+        conn.rollback()
+        flash(f"Failed to register app: {e}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/remove/<app_id>")
+@login_required
+def app_remove(app_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM apps WHERE app_id = %s", (app_id,))
+    conn.commit()
+    conn.close()
+    flash(f"Application '{app_id}' removed — OPA will sync within 60 s", "success")
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/<app_id>/roles/save")
+@login_required
+def app_roles_save(app_id):
+    selected = [r for r in GOVERNED_ROLES if request.form.get(f"role__{r}")]
+    conn     = get_db()
+    execute(conn, "DELETE FROM app_roles WHERE app_id = %s", (app_id,))
+    if selected:
+        for role in selected:
+            execute(conn, "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)", (app_id, role))
+    conn.commit()
+    conn.close()
+    flash(f"Access roles for '{app_id}' updated — OPA will sync within 60 s", "success")
+    return redirect(url_for("apps_list"))
+
+
 # ── Users & Offboarding ───────────────────────────────────────────────────────
 
 @app.get("/users")
 @login_required
 def users_list():
+    users = []
+    error = None
     try:
         users = kc_get_users()
         for u in users:
             u["governed_roles"] = kc_get_user_roles(u["id"])
     except Exception as e:
-        users = []
+        error = str(e)
         flash(f"Keycloak unavailable: {e}", "danger")
-    return render_template("users.html", users=users, roles=GOVERNED_ROLES)
+    return render_template("users.html", users=users, roles=GOVERNED_ROLES, error=error)
+
+
+@app.post("/users/add")
+@login_required
+def user_add():
+    username  = (request.form.get("username")   or "").strip()
+    email     = (request.form.get("email")      or "").strip()
+    first     = (request.form.get("first_name") or "").strip()
+    last      = (request.form.get("last_name")  or "").strip()
+    password  = (request.form.get("password")   or "").strip()
+    role_name = (request.form.get("role")       or "").strip()
+    if not username or not password:
+        flash("Username and password are required", "danger")
+        return redirect(url_for("users_list"))
+    try:
+        kc_create_user(username, email or None, first or None, last or None, password)
+        if role_name and role_name in GOVERNED_ROLES:
+            found = kc_find_user(username)
+            if found:
+                kc_assign_role(found["id"], role_name)
+        flash(
+            f"User '{username}' created"
+            + (f" with role '{role_name}'" if role_name else "")
+            + " — temporary password set",
+            "success",
+        )
+    except Exception as exc:
+        flash(f"Failed to create user: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/users/<user_id>/roles/save")
+@login_required
+def user_roles_save(user_id):
+    selected = [r for r in GOVERNED_ROLES if request.form.get(f"role__{r}")]
+    username = request.form.get("username", user_id)
+    try:
+        current = kc_get_user_roles(user_id)
+        for role in current:
+            kc_revoke_role(user_id, role)
+        for role in selected:
+            kc_assign_role(user_id, role)
+        flash(f"Roles updated for '{username}'", "success")
+    except Exception as exc:
+        flash(f"Failed to update roles: {exc}", "danger")
+    return redirect(url_for("users_list"))
 
 
 @app.post("/users/<user_id>/offboard")
@@ -514,29 +666,32 @@ def users_list():
 def offboard_user(user_id):
     username = request.form.get("username", user_id)
     notes    = request.form.get("notes", "Admin-initiated offboarding")
-    conn = get_db()
-    execute(conn,
-        """INSERT INTO governance_role_requests
-           (user_id, username, request_type, notes)
-           VALUES (%s,%s,'offboarding',%s)""",
-        (user_id, username, notes))
-    conn.commit()
-    conn.close()
-    flash(f"Offboarding request created for {username} — approve it to revoke all roles", "warning")
-    return redirect(url_for("requests_list"))
+    try:
+        kc_disable_user(user_id)
+        conn = get_db()
+        execute(conn,
+            """INSERT INTO governance_role_requests
+               (user_id, username, request_type, notes, status, reviewed_by, reviewed_at)
+               VALUES (%s,%s,'offboarding',%s,'approved',%s,NOW())""",
+            (user_id, username, notes, ADMIN_USER))
+        conn.commit()
+        conn.close()
+        flash(f"User '{username}' disabled — all active sessions immediately revoked", "success")
+    except Exception as exc:
+        flash(f"Failed to offboard '{username}': {exc}", "danger")
+    return redirect(url_for("users_list"))
 
 
 @app.post("/users/<user_id>/request-change")
 @login_required
 def request_role_change(user_id):
-    username     = request.form.get("username", user_id)
-    email        = request.form.get("email", "")
+    username   = request.form.get("username", user_id)
+    email      = request.form.get("email", "")
     old_role   = request.form.get("current_role") or None
     new_role   = request.form.get("new_role") or None
     expires_at = request.form.get("expires_at") or None
     notes      = request.form.get("notes", "")
     req_type   = "onboarding" if not old_role else "change"
-
     conn = get_db()
     execute(conn,
         """INSERT INTO governance_role_requests
@@ -545,8 +700,6 @@ def request_role_change(user_id):
         (user_id, username, email, req_type, new_role, old_role, expires_at, notes))
     conn.commit()
     conn.close()
-    log_event("role_request_submitted",
-              {"username": username, "type": req_type, "requested_role": new_role})
     flash(f"Role change request submitted for {username}", "success")
     return redirect(url_for("requests_list"))
 

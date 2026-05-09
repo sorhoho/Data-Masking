@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Applications – Identity Governance{% endblock %}
+{% block content %}
+
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Applications</h4>
+    <p class="sub">Register apps and set allowed roles — Kong enforces via JWT <code>azp</code> claim → OPA app-role gate</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#addAppModal">
+    <i class="bi bi-plus-lg me-1"></i> Register app
+  </button>
+</div>
+
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
+      <tr>
+        <th>App ID</th>
+        <th>Name</th>
+        <th>Upstream URL</th>
+        <th>Allowed Roles</th>
+        <th>Added</th>
+        <th style="width:120px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in apps %}
+      {% set granted = app_role_map.get(a['app_id'], []) %}
+      <tr>
+        <td><code style="font-size:.8rem">{{ a['app_id'] }}</code></td>
+        <td class="fw-semibold" style="font-size:.84rem">{{ a['name'] }}
+          {% if a['description'] %}<br><span class="text-muted small fw-normal">{{ a['description'] }}</span>{% endif %}
+        </td>
+        <td class="small text-muted">{{ a['upstream_url'] or '—' }}</td>
+        <td>
+          {% if granted %}
+            {% for r in granted %}
+            <span class="chip chip-role me-1 mb-1">{{ r }}</span>
+            {% endfor %}
+          {% else %}
+            <span class="text-muted small"><i class="bi bi-unlock me-1"></i>Open (all roles)</span>
+          {% endif %}
+        </td>
+        <td class="small text-muted">{{ a['added_at'].strftime('%d %b %Y') if a['added_at'] else '—' }}</td>
+        <td>
+          <div class="d-flex gap-1">
+            <button class="btn-ms py-1 px-2" style="font-size:.75rem"
+                    data-bs-toggle="modal" data-bs-target="#rolesModal-{{ a['app_id'] | replace('-','_') }}">
+              <i class="bi bi-shield-check"></i> Roles
+            </button>
+            <form method="post" action="/apps/remove/{{ a['app_id'] }}"
+                  onsubmit="return confirm('Remove {{ a[\'app_id\'] }}? This revokes all role grants for this app.')">
+              <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem">
+                <i class="bi bi-trash3"></i>
+              </button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="6" class="text-center py-5 text-muted">
+          <i class="bi bi-grid-3x3-gap d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No applications registered yet
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Register App Modal -->
+<div class="modal fade" id="addAppModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
+      <form method="post" action="/apps/add">
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold"><i class="bi bi-grid-3x3-gap-fill me-2" style="color:#0078d4"></i>Register Application</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted mb-3">
+            App ID must match the Keycloak <code>client_id</code> exactly — Kong reads <code>azp</code> from the JWT
+            and passes it as <code>input.app_id</code> to OPA.
+          </p>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">App ID <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm" name="app_id" placeholder="e.g. agent-portal" required autofocus>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Display Name <span class="text-danger">*</span></label>
+            <input class="form-control form-control-sm" name="name" placeholder="e.g. Agent Portal" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Upstream URL <span class="text-muted fw-normal">(optional)</span></label>
+            <input class="form-control form-control-sm" name="upstream_url" placeholder="http://service:port">
+          </div>
+          <div>
+            <label class="form-label small fw-semibold">Description <span class="text-muted fw-normal">(optional)</span></label>
+            <input class="form-control form-control-sm" name="description" placeholder="What this app does">
+          </div>
+        </div>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Register</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Role modals (one per app) -->
+{% for a in apps %}
+{% set modal_id = a['app_id'] | replace('-','_') %}
+{% set granted = app_role_map.get(a['app_id'], []) %}
+<div class="modal fade" id="rolesModal-{{ modal_id }}" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
+      <form method="post" action="/apps/{{ a['app_id'] }}/roles/save">
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold">
+            <i class="bi bi-shield-check me-2" style="color:#0078d4"></i>Allowed Roles — <code>{{ a['app_id'] }}</code>
+          </h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted mb-3">
+            Select roles that may access this app. Leave all unchecked = open access for any authenticated role.
+          </p>
+          <div class="row g-2">
+            {% for role in roles %}
+            <div class="col-6 col-md-4 col-lg-3">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox"
+                       name="role__{{ role }}" id="{{ modal_id }}_{{ role }}"
+                       {% if role in granted %}checked{% endif %}>
+                <label class="form-check-label small" for="{{ modal_id }}_{{ role }}">{{ role }}</label>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <span class="small text-muted me-auto">{{ granted | length }} role(s) granted</span>
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Save roles</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}
