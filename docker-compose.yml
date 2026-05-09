@@ -119,6 +119,21 @@ services:
       - governance-service
     restart: on-failure
 
+  # ── Frontend Hub (portal + per-app OIDC frontends) ───────────────────────
+  frontend-hub:
+    build: ./frontend-hub
+    ports:
+      - "3001:3001"
+    environment:
+      KEYCLOAK_URL: "http://localhost:8080"
+      KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
+      KONG_URL: "http://kong:8000"
+      SECRET_KEY: "hub-secret-change-in-production"
+    depends_on:
+      - kong
+      - keycloak
+    restart: on-failure
+
   # ── Customer-Agent Website ────────────────────────────────────────────────
   website:
     build: ./website

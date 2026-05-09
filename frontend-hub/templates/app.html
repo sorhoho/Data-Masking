@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_cfg.label }} – Data Masking Demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <style>
+    body { background: #f8f9fa; }
+    .masking-badge { font-size: .7rem; }
+    pre { white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-{{ app_cfg.color }} shadow-sm" style="{% if app_cfg.color == 'warning' %}background:#ffc107!important;color:#000{% endif %}">
+  <div class="container-fluid px-4">
+    <span class="navbar-brand fw-bold">
+      {{ app_cfg.icon }} {{ app_cfg.label }}
+      <span class="badge bg-dark ms-2 fw-normal" style="font-size:.65rem">{{ app_cfg.client_id }}</span>
+    </span>
+    <div class="d-flex align-items-center gap-3">
+      {% if user %}
+      <span class="text-white small opacity-75">
+        {{ user.get('preferred_username', '') }}
+        {% set roles = user.get('roles', []) %}
+        {% if roles %}
+          <span class="badge bg-dark ms-1">{{ roles | join(', ') }}</span>
+        {% endif %}
+      </span>
+      {% endif %}
+      <a href="/{{ app_key }}/logout" class="btn btn-sm btn-outline-light">Logout</a>
+      <a href="/" class="btn btn-sm btn-outline-light">&#8592; Hub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container py-4" style="max-width: 900px">
+
+  {# ── Lookup form ─────────────────────────────────────────────────────────── #}
+  <div class="card border-0 shadow-sm mb-4">
+    <div class="card-header fw-bold">Customer Lookup</div>
+    <div class="card-body">
+      <form method="get" action="/{{ app_key }}/lookup" class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label small fw-semibold">Customer ID</label>
+          <input name="customer_id" type="text" class="form-control"
+                 placeholder="e.g. C001" value="{{ cid or '' }}" />
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small fw-semibold">or MSISDN</label>
+          <input name="msisdn" type="text" class="form-control"
+                 placeholder="+60123456789" value="{{ msisdn or '' }}" />
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small fw-semibold">Endpoint</label>
+          <select name="endpoint" class="form-select">
+            <option value="crm"     {% if endpoint == 'crm'     %}selected{% endif %}>CRM</option>
+            <option value="billing" {% if endpoint == 'billing' %}selected{% endif %}>Billing</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small fw-semibold">X-Access-Reference</label>
+          <input name="ref" type="text" class="form-control"
+                 placeholder="For VIP" value="{{ access_ref or '' }}" />
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-{{ app_cfg.color }} w-100" type="submit">Lookup</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {# ── Error ───────────────────────────────────────────────────────────────── #}
+  {% if error %}
+  <div class="alert alert-danger">
+    <strong>{{ http_status or 'Error' }}:</strong> {{ error }}
+    {% if raw %}
+    <details class="mt-2">
+      <summary class="small">Raw response</summary>
+      <pre class="small mt-2 mb-0">{{ raw | tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ── Result ──────────────────────────────────────────────────────────────── #}
+  {% if result %}
+  {% set masking = result.get('_masking', {}) %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span class="fw-bold">Response</span>
+      <div class="d-flex gap-2 flex-wrap">
+        <span class="badge bg-{{ app_cfg.color }} masking-badge">
+          app: {{ masking.get('role', '?') }}
+        </span>
+        <span class="badge {% if masking.get('is_vip') %}bg-danger{% else %}bg-secondary{% endif %} masking-badge">
+          tier: {{ masking.get('customer_tier', 'standard') }}
+        </span>
+        {% if masking.get('masked_fields') %}
+        <span class="badge bg-warning text-dark masking-badge">
+          &#128274; {{ masking.get('masked_fields') | length }} masked
+        </span>
+        {% else %}
+        <span class="badge bg-success masking-badge">no masking</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="card-body">
+
+      {# Data table #}
+      <table class="table table-sm table-bordered mb-3">
+        <tbody>
+          {% for k, v in result.items() %}
+          {% if k != '_masking' %}
+          <tr {% if k in masking.get('masked_fields', []) %}class="table-warning"{% endif %}>
+            <td class="fw-semibold small w-25">{{ k }}</td>
+            <td class="small font-monospace">
+              {{ v }}
+              {% if k in masking.get('masked_fields', []) %}
+              <span class="badge bg-warning text-dark ms-1" style="font-size:.6rem">masked</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {# Masking metadata #}
+      {% if masking %}
+      <details>
+        <summary class="small text-muted">&#128270; Masking metadata</summary>
+        <pre class="small mt-2 bg-light rounded p-3">{{ masking | tojson(indent=2) }}</pre>
+      </details>
+      {% endif %}
+
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Empty state ─────────────────────────────────────────────────────────── #}
+  {% if not result and not error %}
+  <div class="text-center text-muted py-5">
+    <div style="font-size:3rem">&#128270;</div>
+    <p class="mt-2">Enter a Customer ID or MSISDN above to see masked data for this app's role.</p>
+    {% if user %}
+    <small>Logged in as <strong>{{ user.get('preferred_username') }}</strong>
+      {% set roles = user.get('roles', []) %}
+      {% if roles %}with role <strong>{{ roles | join(', ') }}</strong>{% endif %}
+    </small>
+    {% endif %}
+  </div>
+  {% endif %}
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

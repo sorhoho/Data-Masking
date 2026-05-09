@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontend Hub – Data Masking Demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <style>
+    body { background: #0d1117; color: #e6edf3; min-height: 100vh; }
+    .app-card { transition: transform .15s, box-shadow .15s; cursor: pointer; background: #161b22; border-color: #30363d !important; }
+    .app-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+    .app-icon { font-size: 2.5rem; line-height: 1; }
+    .badge-login { font-size: .7rem; }
+  </style>
+</head>
+<body>
+
+<div class="container py-5" style="max-width: 960px">
+
+  <div class="text-center mb-5">
+    <div class="fs-1 mb-2">&#128737;</div>
+    <h1 class="fw-bold">Data Masking — Frontend Hub</h1>
+    <p class="text-secondary">Select a frontend application to test role-based data masking &amp; access control</p>
+  </div>
+
+  <div class="row g-4">
+    {% for key, cfg in apps.items() %}
+    <div class="col-md-6">
+      <div class="card app-card border h-100">
+        <div class="card-body p-4">
+          <div class="d-flex justify-content-between align-items-start mb-3">
+            <span class="app-icon">{{ cfg.icon }}</span>
+            {% if logged_in[key] %}
+              <span class="badge bg-success badge-login">&#10003; Logged in</span>
+            {% else %}
+              <span class="badge bg-secondary badge-login">Not logged in</span>
+            {% endif %}
+          </div>
+          <h5 class="fw-bold text-white mb-1">{{ cfg.label }}</h5>
+          <p class="text-secondary small mb-3">{{ cfg.description }}</p>
+          <div class="d-flex gap-2">
+            <a href="/{{ key }}/" class="btn btn-{{ cfg.color }} btn-sm px-3">
+              {% if logged_in[key] %}Open{% else %}Login &amp; Open{% endif %}
+            </a>
+            {% if logged_in[key] %}
+            <a href="/{{ key }}/logout" class="btn btn-outline-secondary btn-sm">Logout</a>
+            {% endif %}
+          </div>
+        </div>
+        <div class="card-footer border-top-0 pt-0 pb-3 px-4">
+          <small class="text-secondary">
+            Keycloak client: <code class="text-{{ cfg.color }}">{{ cfg.client_id }}</code>
+          </small>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="mt-5 text-center text-secondary small">
+    <a href="http://localhost:8888" class="text-secondary me-3" target="_blank">Admin Service</a>
+    <a href="http://localhost:8080/admin" class="text-secondary me-3" target="_blank">Keycloak Admin</a>
+    <a href="http://localhost:3000" class="text-secondary" target="_blank">Customer Website</a>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
