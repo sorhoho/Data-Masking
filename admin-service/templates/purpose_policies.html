@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Purpose Policies – Data Masking Admin{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#127919; Purpose-Driven Masking Policies</h4>
+</div>
+
+<div class="alert alert-info small mb-4">
+  <strong>How it works:</strong> When <code>X-Purpose</code> header is set on a Kong request,
+  OPA reduces masking for the matching (role, purpose) pair. Fields listed here are
+  <em>exempted</em> from masking — visible even though the role normally masks them.
+  Privileged roles (fraud_analyst, admin, etc.) already see all fields — policies only affect
+  roles that have a non-empty masked_fields list.
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">+ Add Policy</div>
+      <div class="card-body">
+        <form method="post" action="/purpose-policies/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold small">Role</label>
+            <select class="form-select form-select-sm" name="role" required>
+              <option value="">Select role…</option>
+              {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small">Purpose</label>
+            <select class="form-select form-select-sm" name="purpose" required>
+              <option value="">Select purpose…</option>
+              {% for p in purposes %}<option value="{{ p }}">{{ p.replace('_',' ') }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold small">Field to unmask</label>
+            <select class="form-select form-select-sm" name="field" required>
+              <option value="">Select field…</option>
+              {% for f in fields %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+            </select>
+          </div>
+          <button class="btn btn-dark w-100 btn-sm" type="submit">Add policy</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-8">
+    {% if policy_map %}
+      {% for role, purposes_dict in policy_map.items() %}
+      <div class="card border-0 shadow-sm mb-3">
+        <div class="card-header fw-bold">{{ role }}</div>
+        <div class="card-body p-0">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr><th>Purpose</th><th>Unmasked field</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for purpose, fields_list in purposes_dict.items() %}
+              {% for field in fields_list %}
+              <tr>
+                <td><span class="badge bg-secondary">{{ purpose.replace('_',' ') }}</span></td>
+                <td><code class="small">{{ field }}</code></td>
+                <td class="text-end">
+                  <form method="post" action="/purpose-policies/delete" class="d-inline">
+                    <input type="hidden" name="role" value="{{ role }}">
+                    <input type="hidden" name="purpose" value="{{ purpose }}">
+                    <input type="hidden" name="field" value="{{ field }}">
+                    <button class="btn btn-sm btn-outline-danger py-0">✕</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="card border-0 shadow-sm">
+        <div class="card-body text-muted">No purpose policies defined yet.</div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

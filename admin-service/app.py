@@ -56,6 +56,15 @@ ROLES = [
     "data_admin",
 ]
 
+PURPOSES = [
+    "fraud_investigation",
+    "compliance_audit",
+    "billing_dispute",
+    "technical_escalation",
+    "regulator_request",
+    "legal_hold",
+]
+
 _DEFAULT_MASKS = [
     # ── Legacy roles ──────────────────────────────────────────────────────────
     ("agent", "name"), ("agent", "msisdn"), ("agent", "email"),
@@ -258,6 +267,14 @@ def init_db():
             role   TEXT NOT NULL,
             PRIMARY KEY (app_id, role)
         )""",
+        """CREATE TABLE IF NOT EXISTS purpose_policies (
+            id         SERIAL PRIMARY KEY,
+            role       TEXT NOT NULL,
+            purpose    TEXT NOT NULL,
+            field      TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
+            UNIQUE(role, purpose, field)
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -303,6 +320,31 @@ def init_db():
             "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
             _DEFAULT_APP_ROLES,
         )
+    if not qone(conn, "SELECT 1 FROM purpose_policies LIMIT 1"):
+        _default_purpose_policies = [
+            # care_l1: fraud investigation unlocks msisdn + email
+            ("care_l1",    "fraud_investigation", "msisdn"),
+            ("care_l1",    "fraud_investigation", "email"),
+            # care_l2: fraud investigation unlocks national_id
+            ("care_l2",    "fraud_investigation", "national_id"),
+            ("care_l2",    "fraud_investigation", "address"),
+            # care_l1: compliance audit unlocks email + address
+            ("care_l1",    "compliance_audit",    "email"),
+            ("care_l1",    "compliance_audit",    "address"),
+            # billing_agent: billing dispute unlocks national_id
+            ("billing_agent", "billing_dispute",  "national_id"),
+            # audit_viewer: compliance audit unlocks name + email
+            ("audit_viewer",  "compliance_audit", "name"),
+            ("audit_viewer",  "compliance_audit", "email"),
+            # audit_viewer: regulator_request unlocks name + msisdn + email
+            ("audit_viewer",  "regulator_request", "name"),
+            ("audit_viewer",  "regulator_request", "msisdn"),
+            ("audit_viewer",  "regulator_request", "email"),
+        ]
+        executemany(conn,
+            "INSERT INTO purpose_policies (role, purpose, field, created_at) VALUES (%s, %s, %s, %s)",
+            [(r, p, f, now) for r, p, f in _default_purpose_policies],
+        )
     conn.commit()
     conn.close()
 
@@ -319,6 +361,9 @@ def get_config():
     )
     app_role_rows = qrows(conn,
         "SELECT app_id, role FROM app_roles ORDER BY app_id, role"
+    )
+    purpose_rows  = qrows(conn,
+        "SELECT role, purpose, field FROM purpose_policies ORDER BY role, purpose, field"
     )
     conn.close()
 
@@ -343,11 +388,16 @@ def get_config():
     for row in app_role_rows:
         app_roles.setdefault(row["app_id"], []).append(row["role"])
 
+    purpose_overrides = {}
+    for row in purpose_rows:
+        purpose_overrides.setdefault(row["role"], {}).setdefault(row["purpose"], []).append(row["field"])
+
     return {
         "customer_tiers":     customer_tiers,
         "role_masked_fields": role_masked_fields,
         "backends":           backends,
         "app_roles":          app_roles,
+        "purpose_overrides":  purpose_overrides,
     }
 
 
@@ -661,6 +711,114 @@ def field_mapping_delete(backend_id, field_id):
     flash("Mapping removed " + ("– synced ✓" if ok else f"– sync failed: {msg}"),
           "success" if ok else "warning")
     return redirect(url_for("backends_list"))
+
+
+# ── Purpose-driven masking policies ──────────────────────────────────────────
+
+@app.get("/purpose-policies")
+@login_required
+def purpose_policies_list():
+    conn = get_db()
+    rows = qrows(conn, "SELECT * FROM purpose_policies ORDER BY role, purpose, field")
+    conn.close()
+    policy_map = {}
+    for row in rows:
+        policy_map.setdefault(row["role"], {}).setdefault(row["purpose"], []).append(row["field"])
+    return render_template("purpose_policies.html",
+                           policy_map=policy_map, roles=ROLES,
+                           purposes=PURPOSES, fields=[f for f, _ in FIELDS])
+
+
+@app.post("/purpose-policies/add")
+@login_required
+def purpose_policy_add():
+    role    = request.form.get("role", "").strip()
+    purpose = request.form.get("purpose", "").strip()
+    field   = request.form.get("field", "").strip()
+    if not role or not purpose or not field:
+        flash("Role, purpose, and field are all required", "danger")
+        return redirect(url_for("purpose_policies_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO purpose_policies (role, purpose, field, created_at) VALUES (%s,%s,%s,%s)",
+            (role, purpose, field, datetime.utcnow().isoformat()))
+        conn.commit()
+        flash(f"Purpose policy added: {role} + {purpose} → {field} unmasked", "success")
+    except Exception as e:
+        conn.rollback()
+        flash(f"Already exists or error: {e}", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("purpose_policies_list"))
+
+
+@app.post("/purpose-policies/delete")
+@login_required
+def purpose_policy_delete():
+    role    = request.form.get("role")
+    purpose = request.form.get("purpose")
+    field   = request.form.get("field")
+    conn = get_db()
+    execute(conn, "DELETE FROM purpose_policies WHERE role=%s AND purpose=%s AND field=%s",
+            (role, purpose, field))
+    conn.commit()
+    conn.close()
+    flash(f"Removed: {role} + {purpose} → {field}", "success")
+    return redirect(url_for("purpose_policies_list"))
+
+
+# ── Masking simulation ────────────────────────────────────────────────────────
+
+@app.route("/simulate", methods=["GET", "POST"])
+@login_required
+def simulate():
+    result = None
+    error  = None
+    form   = {}
+    if request.method == "POST":
+        form = request.form
+        role         = form.get("role", "agent")
+        customer_id  = form.get("customer_id", "C002")
+        purpose      = form.get("purpose", "")
+        channel      = form.get("channel", "web")
+        initiated_by = form.get("initiated_by", "customer")
+        session_type = form.get("session_type", "normal")
+        in_wh        = form.get("in_working_hours", "true") == "true"
+        backend      = form.get("backend", "crm")
+        app_id       = form.get("app_id", "")
+        opa_input = {
+            "input": {
+                "role":        role,
+                "username":    "simulate",
+                "path":        f"/api/customer/{customer_id}",
+                "method":      "GET",
+                "customer_id": customer_id,
+                "backend":     backend,
+                "app_id":      app_id,
+                "ctx": {
+                    "purpose":          purpose,
+                    "channel":          channel,
+                    "initiated_by":     initiated_by,
+                    "session_type":     session_type,
+                    "in_working_hours": in_wh,
+                },
+            }
+        }
+        try:
+            resp = requests.post(
+                f"{OPA_URL}/v1/data/data_masking/decision",
+                json=opa_input, timeout=5,
+            )
+            resp.raise_for_status()
+            result = resp.json().get("result", {})
+        except Exception as exc:
+            error = str(exc)
+    all_fields = [f for f, _ in FIELDS]
+    return render_template("simulate.html",
+                           roles=ROLES, purposes=PURPOSES,
+                           all_fields=all_fields, result=result,
+                           error=error, form=form)
 
 
 # ── Manual OPA sync ───────────────────────────────────────────────────────────

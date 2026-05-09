@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Masking Simulation – Data Masking Admin{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128270; Masking Simulation</h4>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold">Simulation inputs</div>
+      <div class="card-body">
+        <form method="post" action="/simulate">
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label fw-semibold small">Role</label>
+              <select class="form-select form-select-sm" name="role" required>
+                {% for r in roles %}
+                <option value="{{ r }}" {% if form.get('role') == r %}selected{% endif %}>{{ r }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">Customer ID</label>
+              <input class="form-control form-control-sm" name="customer_id"
+                     value="{{ form.get('customer_id', 'C002') }}" placeholder="C001, C002…">
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">Backend</label>
+              <select class="form-select form-select-sm" name="backend">
+                <option value="crm" {% if form.get('backend','crm')=='crm' %}selected{% endif %}>crm</option>
+                <option value="billing" {% if form.get('backend')=='billing' %}selected{% endif %}>billing</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label fw-semibold small">App ID (azp / Keycloak client)</label>
+              <input class="form-control form-control-sm" name="app_id"
+                     value="{{ form.get('app_id', '') }}" placeholder="agent-portal, fraud-console…">
+            </div>
+            <div class="col-12"><hr class="my-1"><div class="small fw-bold text-muted">Context signals</div></div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">X-Purpose</label>
+              <select class="form-select form-select-sm" name="purpose">
+                <option value="">— none —</option>
+                {% for p in purposes %}
+                <option value="{{ p }}" {% if form.get('purpose') == p %}selected{% endif %}>{{ p.replace('_',' ') }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">X-Channel</label>
+              <select class="form-select form-select-sm" name="channel">
+                <option value="web" {% if form.get('channel','web')=='web' %}selected{% endif %}>web</option>
+                <option value="ivr" {% if form.get('channel')=='ivr' %}selected{% endif %}>ivr</option>
+                <option value="mobile" {% if form.get('channel')=='mobile' %}selected{% endif %}>mobile</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">X-Initiated-By</label>
+              <select class="form-select form-select-sm" name="initiated_by">
+                <option value="customer" {% if form.get('initiated_by','customer')=='customer' %}selected{% endif %}>customer</option>
+                <option value="agent" {% if form.get('initiated_by')=='agent' %}selected{% endif %}>agent</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label fw-semibold small">X-Session-Type</label>
+              <select class="form-select form-select-sm" name="session_type">
+                <option value="normal" {% if form.get('session_type','normal')=='normal' %}selected{% endif %}>normal</option>
+                <option value="readonly" {% if form.get('session_type')=='readonly' %}selected{% endif %}>readonly</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="in_working_hours"
+                       value="true" id="iwh"
+                       {% if form.get('in_working_hours', 'true') == 'true' %}checked{% endif %}>
+                <label class="form-check-label small fw-semibold" for="iwh">In working hours</label>
+              </div>
+            </div>
+            <div class="col-12">
+              <button class="btn btn-dark w-100" type="submit">Run simulation</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    {% if error %}
+    <div class="alert alert-danger">OPA error: {{ error }}</div>
+    {% endif %}
+
+    {% if result is not none %}
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold d-flex justify-content-between align-items-center">
+        <span>OPA Decision</span>
+        <span>
+          {% if result.allow %}
+            <span class="badge bg-success">ALLOW</span>
+          {% else %}
+            <span class="badge bg-danger">DENY</span>
+          {% endif %}
+          {% if result.is_vip %}<span class="badge bg-warning text-dark ms-1">VIP</span>{% endif %}
+          <span class="badge bg-secondary ms-1">{{ result.customer_tier or 'standard' }}</span>
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <div class="small fw-bold text-muted mb-2">FIELD VISIBILITY</div>
+          <div class="row g-1">
+            {% for f in all_fields %}
+            {% set masked = f in (result.masked_fields or []) %}
+            <div class="col-6">
+              <div class="d-flex align-items-center gap-2 py-1 px-2 rounded"
+                   style="background:{% if masked %}#fde7e9{% else %}#dff6dd{% endif %}">
+                <span style="font-size:.75rem">{% if masked %}🔴{% else %}🟢{% endif %}</span>
+                <code style="font-size:.78rem">{{ f }}</code>
+                <span class="ms-auto small" style="color:{% if masked %}#8b1a1a{% else %}#1a5e20{% endif %}">
+                  {% if masked %}masked{% else %}visible{% endif %}
+                </span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        {% if result.masked_fields %}
+        <div class="alert alert-secondary py-2 small mb-2">
+          <strong>{{ result.masked_fields | length }}</strong> field(s) masked:
+          {% for f in result.masked_fields %}<code>{{ f }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-success py-2 small mb-2">No fields masked — full data visible</div>
+        {% endif %}
+
+        <details class="small">
+          <summary class="text-muted" style="cursor:pointer">Raw OPA response</summary>
+          <pre class="mt-2 p-2 bg-light rounded" style="font-size:.72rem">{{ result | tojson(indent=2) }}</pre>
+        </details>
+      </div>
+    </div>
+    {% else %}
+    <div class="card border-0 shadow-sm">
+      <div class="card-body text-muted text-center py-5">
+        <div style="font-size:2.5rem;opacity:.2">&#128270;</div>
+        <div class="small mt-2">Configure inputs and run simulation to see OPA decision</div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

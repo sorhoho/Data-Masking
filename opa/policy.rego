@@ -61,6 +61,11 @@ backend_fields := f if {
 }
 default backend_fields := {}
 
+purpose_overrides := data.masking_config.purpose_overrides if {
+    data.masking_config.purpose_overrides
+}
+default purpose_overrides := {}
+
 # ── Customer tier ─────────────────────────────────────────────────────────────
 
 customer_tier := customer_tiers[input.customer_id] if {
@@ -190,6 +195,12 @@ _session_type := input.ctx.session_type if {
     input.ctx.session_type != ""
 }
 
+default _purpose := ""
+_purpose := input.ctx.purpose if {
+    is_string(input.ctx.purpose)
+    input.ctx.purpose != ""
+}
+
 # ── Unmask token: approved fields are subtracted from masking ─────────────────
 
 _token_unmasked contains f if {
@@ -231,14 +242,22 @@ _role_masked contains f if {
     f := role_masked_fields[input.role][_]
 }
 
+# Purpose-based field exemptions: reduce masking when role+purpose grants it
+_purpose_exempt contains f if {
+    exempt_fields := purpose_overrides[input.role][_purpose]
+    f := exempt_fields[_]
+}
+
 _effective_masked contains f if {
     _role_masked[f]
     not _token_unmasked[f]
+    not _purpose_exempt[f]
 }
 
 _effective_masked contains f if {
     _ctx_extra[f]
     not _token_unmasked[f]
+    not _purpose_exempt[f]
 }
 
 # ── Masked fields ─────────────────────────────────────────────────────────────
