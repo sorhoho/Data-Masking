@@ -5,106 +5,149 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>My Access Portal</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-  <style>body { background: #f8f9fa; }</style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    body { background: #f3f2f1; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; font-size:.875rem; }
+    .topbar {
+      background: #0078d4; color: #fff; height: 48px;
+      display: flex; align-items: center; padding: 0 1.5rem; gap: .75rem;
+      box-shadow: 0 2px 6px rgba(0,0,0,.15);
+    }
+    .topbar-brand { font-weight: 600; font-size: .95rem; }
+    .ms-card { background: #fff; border: 1px solid #edebe9; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .chip { display: inline-flex; align-items: center; gap: .25rem; padding: .18rem .55rem;
+      border-radius: 12px; font-size: .71rem; font-weight: 600; }
+    .chip-approved { background: #dff6dd; color: #1a5e20; border: 1px solid #57c068; }
+    .chip-rejected { background: #fde7e9; color: #8b1a1a; border: 1px solid #f87171; }
+    .chip-pending  { background: #fff4ce; color: #7a4f01; border: 1px solid #f3d175; }
+    .chip-role     { background: #deecf9; color: #004578; border: 1px solid #a9cfe3; }
+    .btn-ms { background: #0078d4; color: #fff; border: none; padding: .4rem 1rem;
+      border-radius: 2px; font-size: .84rem; cursor: pointer; }
+    .btn-ms:hover { background: #106ebe; color: #fff; }
+    .ms-tbl { width: 100%; border-collapse: collapse; }
+    .ms-tbl thead th { background: #faf9f8; padding: .5rem .9rem; font-size: .72rem; font-weight: 700;
+      color: #605e5c; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid #edebe9; }
+    .ms-tbl tbody td { padding: .6rem .9rem; border-bottom: 1px solid #f3f2f1; vertical-align: middle; }
+    .ms-tbl tbody tr:last-child td { border-bottom: none; }
+  </style>
 </head>
 <body>
-<nav class="navbar navbar-dark bg-primary shadow-sm px-4">
-  <span class="navbar-brand fw-bold">&#128273; My Access Portal</span>
-  <div class="d-flex align-items-center gap-3">
-    <span class="text-white small">{{ username }}</span>
-    <a class="btn btn-sm btn-outline-light" href="/portal/logout">Sign out</a>
-  </div>
-</nav>
+
+<div class="topbar">
+  <i class="bi bi-shield-lock-fill"></i>
+  <span class="topbar-brand">My Access Portal</span>
+  <div style="flex:1"></div>
+  <div style="font-size:.78rem;opacity:.9"><i class="bi bi-person-circle me-1"></i>{{ username }}</div>
+  <a href="/portal/logout" class="text-white text-decoration-none"
+     style="font-size:.78rem;border:1px solid rgba(255,255,255,.4);padding:.2rem .6rem;border-radius:2px">Sign out</a>
+</div>
 
 <div class="container py-4" style="max-width:900px">
+
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
-      <div class="alert alert-{{ category }} alert-dismissible fade show">
-        {{ message }}
-        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-      </div>
+    <div class="alert alert-{{ category }} alert-dismissible fade show py-2 mb-3" style="font-size:.83rem;border-radius:4px">
+      {{ message }}<button type="button" class="btn-close py-2" data-bs-dismiss="alert"></button>
+    </div>
     {% endfor %}
   {% endwith %}
 
-  <!-- Current roles -->
-  <div class="card mb-4 shadow-sm">
-    <div class="card-header fw-semibold">My current roles</div>
-    <div class="card-body">
+  <!-- Current access -->
+  <div class="ms-card p-4 mb-3">
+    <div class="d-flex align-items-center gap-3 mb-3">
+      <div style="width:48px;height:48px;border-radius:50%;background:#0078d4;
+                  display:flex;align-items:center;justify-content:center;
+                  color:#fff;font-size:1.1rem;font-weight:700;flex-shrink:0">
+        {{ username[:2].upper() }}
+      </div>
+      <div>
+        <div class="fw-semibold" style="font-size:1rem">{{ username }}</div>
+        <div class="text-muted" style="font-size:.8rem">
+          {% if my_roles %}Active governed roles{% else %}No governed roles assigned{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
       {% for role in my_roles %}
-        <span class="badge bg-dark fs-6 me-2">{{ role }}</span>
+      <span class="chip chip-role"><i class="bi bi-person-badge-fill"></i>{{ role }}</span>
       {% else %}
-        <span class="text-muted">No governed roles assigned</span>
+      <span class="text-muted small">No governed roles — submit a request below to get started.</span>
       {% endfor %}
     </div>
   </div>
 
   <!-- Request access -->
-  <div class="card mb-4 shadow-sm">
-    <div class="card-header fw-semibold">Request a role change</div>
-    <div class="card-body">
-      <form method="post" action="/portal/request" class="row g-2 align-items-end">
-        <div class="col-sm-3">
-          <label class="form-label small fw-semibold">Current role (if changing)</label>
-          <select class="form-select form-select-sm" name="old_role">
-            <option value="">None — new request</option>
-            {% for r in my_roles %}
-            <option value="{{ r }}">{{ r }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="col-sm-3">
-          <label class="form-label small fw-semibold">Role requested <span class="text-danger">*</span></label>
-          <select class="form-select form-select-sm" name="requested_role" required>
-            <option value="">Select…</option>
-            {% for r in roles %}
-            <option value="{{ r }}">{{ r }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="col-sm-3">
-          <label class="form-label small fw-semibold">Expires at (optional)</label>
-          <input type="datetime-local" class="form-control form-control-sm" name="expires_at">
-        </div>
-        <div class="col-sm-3">
-          <label class="form-label small fw-semibold">Justification</label>
-          <input class="form-control form-control-sm" name="notes" placeholder="Reason / ticket #">
-        </div>
-        <div class="col-12 mt-2">
-          <button class="btn btn-primary btn-sm" type="submit">Submit request</button>
-        </div>
-      </form>
+  <div class="ms-card p-4 mb-3">
+    <div class="fw-semibold mb-3" style="font-size:.95rem">
+      <i class="bi bi-plus-circle-fill me-2" style="color:#0078d4"></i>Request access
     </div>
+    <form method="post" action="/portal/request" class="row g-3">
+      <div class="col-sm-3">
+        <label class="form-label small fw-semibold">Current role (if changing)</label>
+        <select class="form-select form-select-sm" name="old_role">
+          <option value="">None — new request</option>
+          {% for r in my_roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-sm-3">
+        <label class="form-label small fw-semibold">Role requested <span class="text-danger">*</span></label>
+        <select class="form-select form-select-sm" name="requested_role" required>
+          <option value="">Select…</option>
+          {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-sm-3">
+        <label class="form-label small fw-semibold">Expires at <span class="text-muted fw-normal">(optional)</span></label>
+        <input type="datetime-local" class="form-control form-control-sm" name="expires_at">
+      </div>
+      <div class="col-sm-3">
+        <label class="form-label small fw-semibold">Justification / Ticket #</label>
+        <input class="form-control form-control-sm" name="notes" placeholder="Reason…">
+      </div>
+      <div class="col-12">
+        <button class="btn-ms" type="submit">
+          <i class="bi bi-send-fill me-1"></i>Submit request
+        </button>
+      </div>
+    </form>
   </div>
 
-  <!-- My request history -->
-  <h6 class="fw-semibold mb-2">My requests</h6>
-  <div class="table-responsive">
-    <table class="table table-sm table-hover bg-white rounded shadow-sm">
-      <thead class="table-light">
-        <tr><th>Type</th><th>Role requested</th><th>Status</th><th>Notes</th><th>Submitted</th></tr>
+  <!-- Request history -->
+  <div class="fw-semibold mb-2" style="font-size:.9rem">My requests</div>
+  <div class="ms-card overflow-hidden">
+    <table class="ms-tbl">
+      <thead>
+        <tr><th>Type</th><th>Role</th><th>Status</th><th>Notes</th><th>Submitted</th></tr>
       </thead>
       <tbody>
         {% for r in my_requests %}
         <tr>
-          <td><span class="badge bg-secondary">{{ r.request_type }}</span></td>
-          <td>{{ r.requested_role or '—' }}</td>
+          <td><span class="chip" style="background:#f3f2f1;color:#323130;border:1px solid #c8c6c4">{{ r.request_type }}</span></td>
+          <td class="small fw-semibold">{{ r.requested_role or '—' }}</td>
           <td>
-            <span class="badge
-              {% if r.status == 'approved' %}bg-success
-              {% elif r.status == 'rejected' %}bg-danger
-              {% else %}bg-warning text-dark{% endif %}">
+            <span class="chip chip-{{ r.status }}">
+              {% if r.status == 'approved'  %}<i class="bi bi-check-circle-fill"></i>
+              {% elif r.status == 'rejected' %}<i class="bi bi-x-circle-fill"></i>
+              {% elif r.status == 'pending'  %}<i class="bi bi-hourglass-split"></i>{% endif %}
               {{ r.status }}
             </span>
           </td>
-          <td class="small text-muted">{{ r.notes or '' }}</td>
-          <td class="small text-muted">{{ r.requested_at.strftime('%Y-%m-%d %H:%M') if r.requested_at else '' }}</td>
+          <td class="small text-muted"
+              style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+              title="{{ r.notes or '' }}">{{ r.notes or '' }}</td>
+          <td class="small text-muted">{{ r.requested_at.strftime('%d %b %Y %H:%M') if r.requested_at else '' }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="text-center text-muted">No requests yet</td></tr>
+        <tr>
+          <td colspan="5" class="text-center py-4 text-muted">
+            <i class="bi bi-inbox d-block mb-1" style="font-size:1.5rem;opacity:.25"></i>No requests submitted yet
+          </td>
+        </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>

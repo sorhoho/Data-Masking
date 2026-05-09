@@ -1,61 +1,148 @@
 {% extends "base.html" %}
-{% block title %}Governance Dashboard{% endblock %}
+{% block title %}Dashboard – Identity Governance{% endblock %}
 {% block content %}
 
-<h4 class="fw-bold mb-4">Governance Dashboard</h4>
-
-<div class="row g-3 mb-4">
-  <div class="col-sm-4">
-    <div class="card text-bg-warning h-100">
-      <div class="card-body">
-        <div class="fs-1 fw-bold">{{ pending }}</div>
-        <div>Pending requests</div>
-        <a href="/requests?status=pending" class="stretched-link"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-4">
-    <div class="card text-bg-primary h-100">
-      <div class="card-body">
-        <div class="fs-1 fw-bold">{{ active_reviews }}</div>
-        <div>Active access reviews</div>
-        <a href="/reviews" class="stretched-link"></a>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-4">
-    <div class="card text-bg-secondary h-100">
-      <div class="card-body">
-        <div class="fs-1 fw-bold">&#128100;</div>
-        <div>Manage users</div>
-        <a href="/users" class="stretched-link"></a>
-      </div>
-    </div>
-  </div>
+<div class="page-hdr">
+  <h4>Dashboard</h4>
+  <p class="sub">Identity governance overview and pending activity</p>
 </div>
 
-<h6 class="fw-semibold mb-2">Recent activity</h6>
-<div class="table-responsive">
-  <table class="table table-sm table-hover bg-white rounded shadow-sm">
-    <thead class="table-light">
+<!-- Metric cards -->
+<div class="row g-3 mb-4">
+
+  <div class="col-xl col-md-4 col-sm-6">
+    <div class="ms-card p-3" style="cursor:pointer" onclick="location='/requests?status=pending'">
+      <div class="d-flex align-items-start gap-3">
+        <div class="p-2 rounded-1" style="background:#fff4ce">
+          <i class="bi bi-inbox-fill" style="font-size:1.3rem;color:#c87f0a"></i>
+        </div>
+        <div>
+          <div class="fw-bold" style="font-size:1.6rem;line-height:1.1;color:{% if pending > 0 %}#c87f0a{% else %}#201f1e{% endif %}">{{ pending }}</div>
+          <div class="text-muted small mt-1">Pending role requests</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl col-md-4 col-sm-6">
+    <div class="ms-card p-3" style="cursor:pointer" onclick="location='/reviews'">
+      <div class="d-flex align-items-start gap-3">
+        <div class="p-2 rounded-1" style="background:#deecf9">
+          <i class="bi bi-clipboard2-check-fill" style="font-size:1.3rem;color:#0078d4"></i>
+        </div>
+        <div>
+          <div class="fw-bold" style="font-size:1.6rem;line-height:1.1;color:#201f1e">{{ active_reviews }}</div>
+          <div class="text-muted small mt-1">Active access reviews</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl col-md-4 col-sm-6">
+    <div class="ms-card p-3" style="cursor:pointer" onclick="location='/unmask?status=pending'">
+      <div class="d-flex align-items-start gap-3">
+        <div class="p-2 rounded-1" style="background:#fde7e9">
+          <i class="bi bi-key-fill" style="font-size:1.3rem;color:#c50f1f"></i>
+        </div>
+        <div>
+          <div class="fw-bold" style="font-size:1.6rem;line-height:1.1;color:{% if pending_unmask > 0 %}#c50f1f{% else %}#201f1e{% endif %}">{{ pending_unmask }}</div>
+          <div class="text-muted small mt-1">Pending unmask requests</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl col-md-4 col-sm-6">
+    <div class="ms-card p-3" style="cursor:pointer" onclick="location='/sod'">
+      <div class="d-flex align-items-start gap-3">
+        <div class="p-2 rounded-1" style="background:#dff6dd">
+          <i class="bi bi-diagram-3-fill" style="font-size:1.3rem;color:#107c10"></i>
+        </div>
+        <div>
+          <div class="fw-bold" style="font-size:1.6rem;line-height:1.1;color:#201f1e">{{ sod_rules }}</div>
+          <div class="text-muted small mt-1">SoD rules enforced</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl col-md-4 col-sm-6">
+    <div class="ms-card p-3 {% if expiring_soon > 0 %}border-warning{% endif %}">
+      <div class="d-flex align-items-start gap-3">
+        <div class="p-2 rounded-1" style="background:#fef2e1">
+          <i class="bi bi-clock-history" style="font-size:1.3rem;color:#c87f0a"></i>
+        </div>
+        <div>
+          <div class="fw-bold" style="font-size:1.6rem;line-height:1.1;color:{% if expiring_soon > 0 %}#c87f0a{% else %}#201f1e{% endif %}">{{ expiring_soon }}</div>
+          <div class="text-muted small mt-1">Roles expiring in 7 days</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Recent activity -->
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <span class="fw-semibold" style="color:var(--text-primary)">Recent activity</span>
+  <a href="/requests" class="small text-decoration-none" style="color:var(--ms-blue)">
+    View all <i class="bi bi-arrow-right"></i>
+  </a>
+</div>
+
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
       <tr>
-        <th>#</th><th>User</th><th>Type</th><th>Role requested</th><th>Status</th><th>Submitted</th>
+        <th style="width:32px">#</th>
+        <th>User</th>
+        <th>Request type</th>
+        <th>Role</th>
+        <th>Status</th>
+        <th>Submitted</th>
       </tr>
     </thead>
     <tbody>
       {% for r in recent %}
       <tr>
-        <td>{{ r.id }}</td>
-        <td>{{ r.username }}</td>
-        <td><span class="badge bg-secondary">{{ r.request_type }}</span></td>
-        <td>{{ r.requested_role or '—' }}</td>
+        <td class="text-muted small">{{ r.id }}</td>
         <td>
-          <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+          <div class="d-flex align-items-center gap-2">
+            <div class="avatar">{{ r.username[:2].upper() }}</div>
+            <div>
+              <div class="fw-semibold" style="font-size:.83rem">{{ r.username }}</div>
+              {% if r.email %}<div class="text-muted" style="font-size:.72rem">{{ r.email }}</div>{% endif %}
+            </div>
+          </div>
         </td>
-        <td class="text-muted small">{{ r.requested_at.strftime('%Y-%m-%d %H:%M') if r.requested_at else '' }}</td>
+        <td>
+          <span class="chip chip-{{ r.request_type }}">
+            {% if r.request_type == 'onboarding' %}<i class="bi bi-person-plus-fill"></i>
+            {% elif r.request_type == 'change'    %}<i class="bi bi-arrow-left-right"></i>
+            {% elif r.request_type == 'offboarding' %}<i class="bi bi-person-dash-fill"></i>
+            {% endif %}
+            {{ r.request_type }}
+          </span>
+        </td>
+        <td class="small">{{ r.requested_role or '—' }}</td>
+        <td>
+          <span class="chip chip-{{ r.status }}">
+            {% if r.status == 'pending'  %}<i class="bi bi-hourglass-split"></i>
+            {% elif r.status == 'approved' %}<i class="bi bi-check-circle-fill"></i>
+            {% elif r.status == 'rejected' %}<i class="bi bi-x-circle-fill"></i>
+            {% endif %}
+            {{ r.status }}
+          </span>
+        </td>
+        <td class="text-muted small">{{ r.requested_at.strftime('%d %b %Y  %H:%M') if r.requested_at else '' }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="text-center text-muted">No activity yet</td></tr>
+      <tr>
+        <td colspan="6" class="text-center py-5 text-muted">
+          <i class="bi bi-inbox d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No activity yet
+        </td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>

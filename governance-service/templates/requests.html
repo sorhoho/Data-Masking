@@ -1,65 +1,102 @@
 {% extends "base.html" %}
-{% block title %}Role Requests{% endblock %}
+{% block title %}Role Requests – Identity Governance{% endblock %}
 {% block content %}
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="fw-bold mb-0">Role Requests</h4>
-  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newRequestModal">
-    + New Request
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Role Requests</h4>
+    <p class="sub">Review and approve identity lifecycle requests</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#newRequestModal">
+    <i class="bi bi-plus-lg me-1"></i> New Request
   </button>
 </div>
 
-<!-- Status filter -->
-<ul class="nav nav-pills mb-3">
+<!-- Status filter tabs -->
+<ul class="nav nav-tabs mb-3" style="border-bottom-color:#edebe9">
   {% for s in ['pending','approved','rejected'] %}
   <li class="nav-item">
-    <a class="nav-link {% if status == s %}active{% endif %}" href="/requests?status={{ s }}">
+    <a class="nav-link {% if status == s %}active fw-semibold{% endif %}" href="/requests?status={{ s }}"
+       style="font-size:.83rem;color:{% if status==s %}#0078d4{% else %}#605e5c{% endif %}">
+      {% if s == 'pending' %}<i class="bi bi-hourglass-split me-1"></i>
+      {% elif s == 'approved' %}<i class="bi bi-check-circle me-1"></i>
+      {% elif s == 'rejected' %}<i class="bi bi-x-circle me-1"></i>{% endif %}
       {{ s|capitalize }}
     </a>
   </li>
   {% endfor %}
 </ul>
 
-<div class="table-responsive">
-  <table class="table table-hover bg-white rounded shadow-sm">
-    <thead class="table-light">
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
       <tr>
-        <th>#</th><th>User</th><th>Type</th><th>Current role</th><th>Requested role</th>
-        <th>Expires</th><th>Notes</th><th>Submitted</th><th>Actions</th>
+        <th>#</th>
+        <th>User</th>
+        <th>Type</th>
+        <th>From role</th>
+        <th>To role</th>
+        <th>Expires</th>
+        <th>Submitted</th>
+        <th>Notes</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
       {% for r in rows %}
       <tr>
-        <td>{{ r.id }}</td>
-        <td><strong>{{ r.username }}</strong><br><small class="text-muted">{{ r.email }}</small></td>
-        <td><span class="badge bg-secondary">{{ r.request_type }}</span></td>
-        <td>{{ r.old_role or '—' }}</td>
-        <td>{{ r.requested_role or '—' }}</td>
+        <td class="text-muted small">{{ r.id }}</td>
+        <td>
+          <div class="d-flex align-items-center gap-2">
+            <div class="avatar">{{ r.username[:2].upper() }}</div>
+            <div>
+              <div class="fw-semibold" style="font-size:.83rem">{{ r.username }}</div>
+              {% if r.email %}<div class="text-muted" style="font-size:.72rem">{{ r.email }}</div>{% endif %}
+            </div>
+          </div>
+        </td>
+        <td><span class="chip chip-{{ r.request_type }}">{{ r.request_type }}</span></td>
+        <td class="small text-muted">{{ r.old_role or '—' }}</td>
+        <td class="small fw-semibold">{{ r.requested_role or '—' }}</td>
         <td class="small text-muted">
           {% if r.expires_at %}
-            {{ r.expires_at.strftime('%Y-%m-%d') }}
-            {% if r.revoked_at %}<br><span class="text-danger">Revoked {{ r.revoked_at.strftime('%Y-%m-%d') }}</span>{% endif %}
+            <i class="bi bi-calendar3 me-1"></i>{{ r.expires_at.strftime('%d %b %Y') }}
+            {% if r.revoked_at %}
+              <br><span style="color:#c50f1f;font-size:.7rem"><i class="bi bi-x-circle"></i> Revoked</span>
+            {% endif %}
           {% else %}—{% endif %}
         </td>
-        <td class="small">{{ r.notes or '' }}</td>
-        <td class="small text-muted">{{ r.requested_at.strftime('%Y-%m-%d %H:%M') if r.requested_at else '' }}</td>
+        <td class="small text-muted">{{ r.requested_at.strftime('%d %b %Y %H:%M') if r.requested_at else '' }}</td>
+        <td class="small text-muted" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ r.notes or '' }}">{{ r.notes or '' }}</td>
         <td>
           {% if r.status == 'pending' %}
-          <form method="post" action="/requests/{{ r.id }}/approve" class="d-inline">
-            <button class="btn btn-success btn-sm">Approve</button>
-          </form>
-          <form method="post" action="/requests/{{ r.id }}/reject" class="d-inline ms-1">
-            <button class="btn btn-outline-danger btn-sm">Reject</button>
-          </form>
+          <div class="d-flex gap-1">
+            <form method="post" action="/requests/{{ r.id }}/approve">
+              <button class="btn-ms py-1 px-2" style="font-size:.75rem">
+                <i class="bi bi-check-lg"></i> Approve
+              </button>
+            </form>
+            <form method="post" action="/requests/{{ r.id }}/reject">
+              <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem">
+                <i class="bi bi-x-lg"></i> Reject
+              </button>
+            </form>
+          </div>
           {% else %}
-          <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
-          {% if r.reviewed_by %}<br><small class="text-muted">by {{ r.reviewed_by }}</small>{% endif %}
+          <div>
+            <span class="chip chip-{{ r.status }}">{{ r.status }}</span>
+            {% if r.reviewed_by %}<div class="text-muted mt-1" style="font-size:.7rem">by {{ r.reviewed_by }}</div>{% endif %}
+          </div>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="9" class="text-center text-muted py-4">No {{ status }} requests</td></tr>
+      <tr>
+        <td colspan="9" class="text-center py-5 text-muted">
+          <i class="bi bi-inbox d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No {{ status }} requests
+        </td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
@@ -68,22 +105,20 @@
 <!-- New Request Modal -->
 <div class="modal fade" id="newRequestModal" tabindex="-1">
   <div class="modal-dialog">
-    <div class="modal-content">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
       <form method="post" action="/requests/new">
-        <div class="modal-header">
-          <h5 class="modal-title">New Role Request</h5>
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold">New Role Request</h6>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <div class="mb-3">
-            <label class="form-label fw-semibold">User</label>
-            <select class="form-select" name="user_id" id="userSelect" required onchange="fillUser(this)">
+            <label class="form-label small fw-semibold">User</label>
+            <select class="form-select form-select-sm" name="user_id" id="userSelect" required onchange="fillUser(this)">
               <option value="">Select user…</option>
               {% for u in kc_users %}
-              <option value="{{ u.id }}"
-                data-username="{{ u.username }}"
-                data-email="{{ u.email or '' }}">
-                {{ u.username }} {% if u.email %}({{ u.email }}){% endif %}
+              <option value="{{ u.id }}" data-username="{{ u.username }}" data-email="{{ u.email or '' }}">
+                {{ u.username }}{% if u.email %} ({{ u.email }}){% endif %}
               </option>
               {% endfor %}
             </select>
@@ -91,8 +126,8 @@
             <input type="hidden" name="email"    id="hiddenEmail">
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Request type</label>
-            <select class="form-select" name="request_type" required>
+            <label class="form-label small fw-semibold">Request type</label>
+            <select class="form-select form-select-sm" name="request_type" required>
               <option value="onboarding">Onboarding — grant initial role</option>
               <option value="change">Role change — swap current role</option>
               <option value="offboarding">Offboarding — revoke all roles</option>
@@ -100,42 +135,40 @@
           </div>
           <div class="row g-2 mb-3">
             <div class="col">
-              <label class="form-label fw-semibold">Current role</label>
-              <select class="form-select" name="current_role">
+              <label class="form-label small fw-semibold">Current role</label>
+              <select class="form-select form-select-sm" name="current_role">
                 <option value="">None</option>
-                {% for r in roles %}
-                <option value="{{ r }}">{{ r }}</option>
-                {% endfor %}
+                {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
               </select>
             </div>
             <div class="col">
-              <label class="form-label fw-semibold">Requested role</label>
-              <select class="form-select" name="requested_role">
+              <label class="form-label small fw-semibold">Requested role</label>
+              <select class="form-select form-select-sm" name="requested_role">
                 <option value="">None (offboarding)</option>
-                {% for r in roles %}
-                <option value="{{ r }}">{{ r }}</option>
-                {% endfor %}
+                {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
               </select>
             </div>
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Expires at <small class="text-muted">(optional)</small></label>
-            <input type="datetime-local" class="form-control" name="expires_at">
+            <label class="form-label small fw-semibold">Expires at <span class="text-muted fw-normal">(optional — leave blank for permanent)</span></label>
+            <input type="datetime-local" class="form-control form-control-sm" name="expires_at">
           </div>
-          <div class="mb-3">
-            <label class="form-label fw-semibold">Notes</label>
-            <textarea class="form-control" name="notes" rows="2"></textarea>
+          <div class="mb-1">
+            <label class="form-label small fw-semibold">Business justification</label>
+            <textarea class="form-control form-control-sm" name="notes" rows="2" placeholder="Ticket #, reason…"></textarea>
           </div>
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Submit request</button>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Submit request</button>
         </div>
       </form>
     </div>
   </div>
 </div>
 
+{% endblock %}
+{% block scripts %}
 <script>
 function fillUser(sel) {
   const opt = sel.options[sel.selectedIndex];

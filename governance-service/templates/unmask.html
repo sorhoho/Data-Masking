@@ -1,113 +1,149 @@
 {% extends "base.html" %}
-{% block title %}Unmask Requests – Governance{% endblock %}
+{% block title %}Unmask Requests – Identity Governance{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">&#128275; Approval-Based Unmask Requests</h4>
-  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newUnmaskModal">
-    + New Request
+
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Unmask Requests</h4>
+    <p class="sub">Approve or reject field-level data unmasking (T2 approval gate)</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#newUnmaskModal">
+    <i class="bi bi-plus-lg me-1"></i> New Request
   </button>
 </div>
 
-<!-- Status filter tabs -->
-<ul class="nav nav-tabs mb-3">
+<!-- Status filter -->
+<ul class="nav nav-tabs mb-3" style="border-bottom-color:#edebe9">
   {% for s in ['pending','approved','consumed','rejected'] %}
   <li class="nav-item">
-    <a class="nav-link {% if status == s %}active{% endif %}" href="/unmask?status={{ s }}">
+    <a class="nav-link {% if status == s %}active fw-semibold{% endif %}" href="/unmask?status={{ s }}"
+       style="font-size:.83rem;color:{% if status==s %}#0078d4{% else %}#605e5c{% endif %}">
+      {% if s == 'pending'  %}<i class="bi bi-hourglass-split me-1"></i>
+      {% elif s == 'approved' %}<i class="bi bi-check-circle me-1"></i>
+      {% elif s == 'consumed' %}<i class="bi bi-lock-fill me-1"></i>
+      {% elif s == 'rejected' %}<i class="bi bi-x-circle me-1"></i>{% endif %}
       {{ s|capitalize }}
     </a>
   </li>
   {% endfor %}
 </ul>
 
-<div class="card shadow-sm">
-  <div class="table-responsive">
-    <table class="table table-hover mb-0">
-      <thead class="table-light">
-        <tr>
-          <th>Token (UUID)</th>
-          <th>User</th>
-          <th>Customer ID</th>
-          <th>Reason</th>
-          <th>Ticket Ref</th>
-          <th>Fields</th>
-          <th>Requested</th>
-          <th>Expires</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in rows %}
-        <tr>
-          <td><code style="font-size:.75em">{{ row.id }}</code></td>
-          <td>{{ row.username }}</td>
-          <td><code>{{ row.customer_id }}</code></td>
-          <td><span class="badge bg-secondary">{{ row.reason_code }}</span></td>
-          <td>{{ row.ticket_ref or '—' }}</td>
-          <td>
-            {% set flist = row.fields if row.fields is iterable and row.fields is not string else [] %}
-            {% if flist %}
-              {% for f in flist %}<span class="badge bg-info text-dark me-1">{{ f }}</span>{% endfor %}
-            {% else %}
-              <span class="text-muted">all</span>
-            {% endif %}
-          </td>
-          <td>{{ row.requested_at.strftime('%Y-%m-%d %H:%M') if row.requested_at else '—' }}</td>
-          <td>
-            {% if row.expires_at %}
-              {{ row.expires_at.strftime('%Y-%m-%d %H:%M') }}
-            {% else %}—{% endif %}
-          </td>
-          <td>
-            {% if row.status == 'pending' %}
-            <form method="post" action="/unmask/{{ row.id }}/approve" class="d-inline">
-              <button class="btn btn-success btn-sm">Approve</button>
-            </form>
-            <form method="post" action="/unmask/{{ row.id }}/reject" class="d-inline ms-1">
-              <button class="btn btn-danger btn-sm">Reject</button>
-            </form>
-            {% elif row.status == 'approved' %}
-            <span class="badge bg-success">Active</span>
-            <small class="text-muted ms-1">15 min</small>
-            {% elif row.status == 'consumed' %}
-            <span class="badge bg-dark">Consumed</span>
-            <small class="text-muted ms-1">one-time used</small>
-            {% else %}
-            <span class="badge bg-danger">Rejected</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="9" class="text-center text-muted py-4">No {{ status }} unmask requests</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-
-<!-- Usage instructions for approved tokens -->
 {% if status == 'approved' %}
-<div class="alert alert-info mt-3">
-  <strong>How to use an approved token:</strong><br>
-  Add the header <code>X-Unmask-Token: &lt;token-UUID&gt;</code> to the API call on <code>GET /api/customer/&lt;customer_id&gt;</code>.
-  The gateway validates the token against the requesting user and customer. <strong>Token is single-use and expires 15 minutes after approval.</strong>
+<div class="alert alert-primary d-flex align-items-start gap-2 mb-3 py-2" style="font-size:.83rem">
+  <i class="bi bi-info-circle-fill mt-1"></i>
+  <span>
+    Approved tokens are <strong>single-use</strong> and expire <strong>15 minutes</strong> after approval.
+    The agent adds header <code>X-Unmask-Token: &lt;token-UUID&gt;</code> to their API call.
+    Token is bound to the requesting user and customer — replays are rejected.
+  </span>
 </div>
 {% endif %}
+
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
+      <tr>
+        <th>Token</th>
+        <th>Requesting user</th>
+        <th>Customer ID</th>
+        <th>Fields to unmask</th>
+        <th>Reason</th>
+        <th>Ticket</th>
+        <th>Submitted</th>
+        <th>Expires / Used</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <code style="font-size:.7rem;color:#605e5c" title="{{ row.id }}">
+            {{ row.id | string | truncate(13, true, '…') }}
+          </code>
+        </td>
+        <td>
+          <div class="d-flex align-items-center gap-2">
+            <div class="avatar" style="font-size:.6rem">{{ row.username[:2].upper() }}</div>
+            <span style="font-size:.83rem">{{ row.username }}</span>
+          </div>
+        </td>
+        <td><code style="font-size:.8rem">{{ row.customer_id }}</code></td>
+        <td>
+          {% set flist = row.fields if row.fields is iterable and row.fields is not string else [] %}
+          {% if flist %}
+            {% for f in flist %}
+            <span class="chip chip-active me-1 mb-1">{{ f }}</span>
+            {% endfor %}
+          {% else %}
+            <span class="text-muted small">all fields</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="chip chip-pending" style="font-size:.68rem">{{ row.reason_code.replace('_',' ') }}</span>
+        </td>
+        <td class="small text-muted">{{ row.ticket_ref or '—' }}</td>
+        <td class="small text-muted">{{ row.requested_at.strftime('%d %b %Y %H:%M') if row.requested_at else '—' }}</td>
+        <td class="small">
+          {% if row.status == 'approved' and row.expires_at %}
+            <span style="color:#107c10"><i class="bi bi-clock me-1"></i>{{ row.expires_at.strftime('%H:%M:%S') }}</span>
+            <br><span class="text-muted" style="font-size:.7rem">{{ row.expires_at.strftime('%d %b') }}</span>
+          {% elif row.status == 'consumed' and row.used_at %}
+            <span class="text-muted" style="font-size:.75rem">
+              <i class="bi bi-lock-fill me-1"></i>{{ row.used_at.strftime('%d %b %Y %H:%M') }}
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if row.status == 'pending' %}
+          <div class="d-flex gap-1">
+            <form method="post" action="/unmask/{{ row.id }}/approve">
+              <button class="btn-ms py-1 px-2" style="font-size:.75rem">
+                <i class="bi bi-check-lg"></i> Approve
+              </button>
+            </form>
+            <form method="post" action="/unmask/{{ row.id }}/reject">
+              <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem">
+                <i class="bi bi-x-lg"></i> Reject
+              </button>
+            </form>
+          </div>
+          {% elif row.status == 'approved' %}
+          <span class="chip chip-approved"><i class="bi bi-check-circle-fill"></i> Active · 15 min</span>
+          {% elif row.status == 'consumed' %}
+          <span class="chip chip-consumed"><i class="bi bi-lock-fill"></i> One-time used</span>
+          {% else %}
+          <span class="chip chip-rejected"><i class="bi bi-x-circle-fill"></i> Rejected</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="9" class="text-center py-5 text-muted">
+          <i class="bi bi-key d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No {{ status }} unmask requests
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 
 <!-- New Unmask Request Modal -->
 <div class="modal fade" id="newUnmaskModal" tabindex="-1">
   <div class="modal-dialog modal-lg">
-    <div class="modal-content">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
       <form method="post" action="/unmask/request">
-        <div class="modal-header">
-          <h5 class="modal-title">New Unmask Request</h5>
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold"><i class="bi bi-key-fill me-2" style="color:#0078d4"></i>New Unmask Request</h6>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <div class="row g-3">
             <div class="col-md-6">
-              <label class="form-label">Agent (Requestor)</label>
-              <select name="user_id" class="form-select" required id="unmask-user-select">
-                <option value="">— select agent —</option>
+              <label class="form-label small fw-semibold">Agent (Requestor)</label>
+              <select name="user_id" class="form-select form-select-sm" required id="unmask-user-select">
+                <option value="">Select agent…</option>
                 {% for u in kc_users %}
                 <option value="{{ u.id }}" data-username="{{ u.username or '' }}">
                   {{ u.username }} ({{ u.email or 'no email' }})
@@ -117,47 +153,49 @@
               <input type="hidden" name="username" id="unmask-username-hidden">
             </div>
             <div class="col-md-6">
-              <label class="form-label">Customer ID</label>
-              <input type="text" name="customer_id" class="form-control" placeholder="e.g. CRM-001" required>
+              <label class="form-label small fw-semibold">Customer ID</label>
+              <input type="text" name="customer_id" class="form-control form-control-sm" placeholder="e.g. C001" required>
             </div>
             <div class="col-md-6">
-              <label class="form-label">Reason Code</label>
-              <select name="reason_code" class="form-select" required>
+              <label class="form-label small fw-semibold">Reason Code</label>
+              <select name="reason_code" class="form-select form-select-sm" required>
                 {% for rc in reason_codes %}
                 <option value="{{ rc }}">{{ rc.replace('_', ' ') }}</option>
                 {% endfor %}
               </select>
             </div>
             <div class="col-md-6">
-              <label class="form-label">Ticket / Case Reference</label>
-              <input type="text" name="ticket_ref" class="form-control" placeholder="TKT-12345">
+              <label class="form-label small fw-semibold">Ticket / Case Reference</label>
+              <input type="text" name="ticket_ref" class="form-control form-control-sm" placeholder="TKT-12345">
             </div>
             <div class="col-12">
-              <label class="form-label">Fields to Unmask <small class="text-muted">(leave all unchecked = all fields)</small></label>
-              <div class="d-flex flex-wrap gap-2">
+              <label class="form-label small fw-semibold">Fields to Unmask <span class="text-muted fw-normal">(leave all unchecked = all fields)</span></label>
+              <div class="d-flex flex-wrap gap-3 mt-1">
                 {% for f in unmask_fields %}
                 <div class="form-check">
                   <input class="form-check-input" type="checkbox" name="fields" value="{{ f }}" id="uf_{{ f }}">
-                  <label class="form-check-label" for="uf_{{ f }}">{{ f }}</label>
+                  <label class="form-check-label small" for="uf_{{ f }}">{{ f }}</label>
                 </div>
                 {% endfor %}
               </div>
             </div>
             <div class="col-12">
-              <label class="form-label">Notes / Justification</label>
-              <textarea name="notes" class="form-control" rows="2" placeholder="Provide business justification..."></textarea>
+              <label class="form-label small fw-semibold">Business Justification</label>
+              <textarea name="notes" class="form-control form-control-sm" rows="2" placeholder="Provide business justification…"></textarea>
             </div>
           </div>
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Submit Request</button>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Submit request</button>
         </div>
       </form>
     </div>
   </div>
 </div>
 
+{% endblock %}
+{% block scripts %}
 <script>
 document.getElementById('unmask-user-select').addEventListener('change', function() {
   const opt = this.options[this.selectedIndex];

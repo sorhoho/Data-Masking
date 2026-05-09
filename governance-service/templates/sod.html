@@ -1,40 +1,53 @@
 {% extends "base.html" %}
-{% block title %}Separation of Duties{% endblock %}
+{% block title %}Separation of Duties – Identity Governance{% endblock %}
 {% block content %}
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="fw-bold mb-0">Separation of Duties Rules</h4>
-  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addSodModal">
-    + Add rule
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Separation of Duties</h4>
+    <p class="sub">Mutually exclusive role pairs — approving either role when the user holds the other is automatically blocked</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#addSodModal">
+    <i class="bi bi-plus-lg me-1"></i> Add rule
   </button>
 </div>
 
-<p class="text-muted small mb-3">
-  Role pairs listed here are <strong>mutually exclusive</strong>. Approving a request that would give a user both roles is blocked automatically.
-</p>
-
-<div class="table-responsive">
-  <table class="table table-hover bg-white rounded shadow-sm">
-    <thead class="table-light">
-      <tr><th>Role A</th><th>✕</th><th>Role B</th><th>Reason</th><th>Added</th><th></th></tr>
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
+      <tr>
+        <th>Role A</th>
+        <th style="width:32px;text-align:center">×</th>
+        <th>Role B</th>
+        <th>Reason</th>
+        <th>Added</th>
+        <th style="width:80px"></th>
+      </tr>
     </thead>
     <tbody>
       {% for r in rules %}
       <tr>
-        <td><span class="badge bg-dark">{{ r.role_a }}</span></td>
-        <td class="text-danger fw-bold">✕</td>
-        <td><span class="badge bg-dark">{{ r.role_b }}</span></td>
+        <td><span class="chip chip-active">{{ r.role_a }}</span></td>
+        <td style="text-align:center;color:#c50f1f;font-weight:700">×</td>
+        <td><span class="chip chip-active">{{ r.role_b }}</span></td>
         <td class="small text-muted">{{ r.reason }}</td>
-        <td class="small text-muted">{{ r.created_at.strftime('%Y-%m-%d') if r.created_at else '' }}</td>
+        <td class="small text-muted">{{ r.created_at.strftime('%d %b %Y') if r.created_at else '' }}</td>
         <td>
           <form method="post" action="/sod/{{ r.id }}/delete"
                 onsubmit="return confirm('Remove this SoD rule?')">
-            <button class="btn btn-outline-danger btn-sm">Remove</button>
+            <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem">
+              <i class="bi bi-trash3"></i>
+            </button>
           </form>
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="text-center text-muted py-4">No rules defined</td></tr>
+      <tr>
+        <td colspan="6" class="text-center py-5 text-muted">
+          <i class="bi bi-diagram-3 d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No SoD rules defined
+        </td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
@@ -43,33 +56,33 @@
 <!-- Add rule modal -->
 <div class="modal fade" id="addSodModal" tabindex="-1">
   <div class="modal-dialog modal-sm">
-    <div class="modal-content">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
       <form method="post" action="/sod/add">
-        <div class="modal-header">
-          <h5 class="modal-title">Add SoD Rule</h5>
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold">Add SoD Rule</h6>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <div class="mb-2">
-            <label class="form-label fw-semibold">Role A</label>
-            <select class="form-select" name="role_a" required>
+            <label class="form-label small fw-semibold">Role A</label>
+            <select class="form-select form-select-sm" name="role_a" required>
               {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
             </select>
           </div>
           <div class="mb-2">
-            <label class="form-label fw-semibold">Role B</label>
-            <select class="form-select" name="role_b" required>
+            <label class="form-label small fw-semibold">Role B</label>
+            <select class="form-select form-select-sm" name="role_b" required>
               {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
             </select>
           </div>
-          <div class="mb-2">
-            <label class="form-label fw-semibold">Reason</label>
-            <input class="form-control" name="reason" placeholder="Why are these incompatible?">
+          <div class="mb-1">
+            <label class="form-label small fw-semibold">Reason</label>
+            <input class="form-control form-control-sm" name="reason" placeholder="Why are these roles incompatible?">
           </div>
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Add rule</button>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Add rule</button>
         </div>
       </form>
     </div>

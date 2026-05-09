@@ -3,33 +3,63 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>My Access Portal</title>
+  <title>My Access Portal – Sign in</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    body {
+      background: #f3f2f1;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .login-card {
+      background: #fff; border: 1px solid #edebe9;
+      border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,.1);
+      width: 100%; max-width: 400px; padding: 2.5rem 2rem;
+    }
+    .form-control { border-radius: 2px; border-color: #8a8886; font-size: .875rem; }
+    .form-control:focus { border-color: #0078d4; box-shadow: 0 0 0 1px #0078d4; }
+    .btn-signin {
+      background: #0078d4; color: #fff; border: none;
+      width: 100%; padding: .55rem; border-radius: 2px;
+      font-size: .9rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-signin:hover { background: #106ebe; }
+  </style>
 </head>
-<body class="bg-light d-flex align-items-center" style="min-height:100vh">
-<div class="container" style="max-width:380px">
-  <div class="card shadow-sm">
-    <div class="card-body p-4">
-      <h5 class="card-title fw-bold mb-1">&#128273; My Access Portal</h5>
-      <p class="text-muted small mb-3">Sign in with your Keycloak account to request or review your role assignments.</p>
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% for category, message in messages %}
-          <div class="alert alert-{{ category }} py-2">{{ message }}</div>
-        {% endfor %}
-      {% endwith %}
-      <form method="post">
-        <div class="mb-3">
-          <input class="form-control" name="username" placeholder="Username" required autofocus>
-        </div>
-        <div class="mb-3">
-          <input class="form-control" type="password" name="password" placeholder="Password" required>
-        </div>
-        <button class="btn btn-primary w-100" type="submit">Sign in</button>
-      </form>
-      <hr class="my-3">
-      <a href="/login" class="text-muted small">Admin? Sign in here →</a>
+<body>
+<div class="login-card">
+  <div class="text-center mb-4">
+    <i class="bi bi-shield-lock-fill" style="color:#0078d4;font-size:2rem"></i>
+    <div class="fw-semibold mt-2" style="font-size:1.1rem;color:#201f1e">My Access Portal</div>
+    <div class="text-muted" style="font-size:.82rem">Data Masking Platform — Self-Service</div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+    <div class="alert alert-{{ category }} py-2 mb-3" style="font-size:.82rem;border-radius:2px">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post" action="/portal/login">
+    <div class="mb-3">
+      <label class="form-label small fw-semibold">Username</label>
+      <input type="text" name="username" class="form-control" placeholder="agent1" required autofocus>
     </div>
+    <div class="mb-4">
+      <label class="form-label small fw-semibold">Password</label>
+      <input type="password" name="password" class="form-control" placeholder="••••••••" required>
+    </div>
+    <button type="submit" class="btn-signin">
+      <i class="bi bi-box-arrow-in-right me-2"></i>Sign in
+    </button>
+  </form>
+
+  <div class="text-center mt-3 text-muted" style="font-size:.76rem">
+    Use your Keycloak credentials. Admin tasks:
+    <a href="/" style="color:#0078d4;text-decoration:none">Governance Console</a>
   </div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

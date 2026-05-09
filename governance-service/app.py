@@ -313,6 +313,20 @@ def log_event(event_type, details):
     threading.Thread(target=_send, daemon=True).start()
 
 
+# ── Template context (sidebar badge counts) ──────────────────────────────────
+
+@app.context_processor
+def sidebar_counts():
+    try:
+        conn = get_db()
+        pc  = scalar(conn, "SELECT COUNT(*) FROM governance_role_requests WHERE status='pending'")
+        upc = scalar(conn, "SELECT COUNT(*) FROM unmask_sessions WHERE status='pending'")
+        conn.close()
+        return {"pending_count": pc or 0, "unmask_pending_count": upc or 0}
+    except Exception:
+        return {"pending_count": 0, "unmask_pending_count": 0}
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def login_required(f):
@@ -363,10 +377,19 @@ def dashboard():
     conn = get_db()
     pending        = scalar(conn, "SELECT COUNT(*) FROM governance_role_requests WHERE status='pending'")
     active_reviews = scalar(conn, "SELECT COUNT(*) FROM governance_access_campaigns WHERE status='active'")
-    recent         = qrows(conn, "SELECT * FROM governance_role_requests ORDER BY requested_at DESC LIMIT 8")
+    pending_unmask = scalar(conn, "SELECT COUNT(*) FROM unmask_sessions WHERE status='pending'")
+    sod_rules      = scalar(conn, "SELECT COUNT(*) FROM governance_sod_rules")
+    expiring_soon  = scalar(conn,
+        """SELECT COUNT(*) FROM governance_role_requests
+           WHERE status='approved' AND expires_at IS NOT NULL
+             AND expires_at BETWEEN NOW() AND NOW() + INTERVAL '7 days'
+             AND revoked_at IS NULL""")
+    recent = qrows(conn, "SELECT * FROM governance_role_requests ORDER BY requested_at DESC LIMIT 10")
     conn.close()
-    return render_template("dashboard.html", pending=pending,
-                           active_reviews=active_reviews, recent=recent)
+    return render_template("dashboard.html",
+                           pending=pending, active_reviews=active_reviews,
+                           pending_unmask=pending_unmask, sod_rules=sod_rules,
+                           expiring_soon=expiring_soon, recent=recent)
 
 
 # ── Role Requests ─────────────────────────────────────────────────────────────
