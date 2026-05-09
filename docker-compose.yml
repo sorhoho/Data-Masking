@@ -128,6 +128,7 @@ services:
       KEYCLOAK_URL: "http://localhost:8080"
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KONG_URL: "http://kong:8000"
+      OPA_URL: "http://opa:8181"
       SECRET_KEY: "hub-secret-change-in-production"
     depends_on:
       - kong

@@ -18,7 +18,28 @@ else:
     KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
 
 KONG_URL = os.environ.get("KONG_URL", "http://kong:8000")
+OPA_URL  = os.environ.get("OPA_URL",  "http://opa:8181")
 REALM    = "demo"
+
+# Same priority table as Kong — used to pick effective role from JWT claims
+ROLE_PRIORITY = {
+    "admin": 10, "data_admin": 9,
+    "compliance_officer": 8, "fraud_analyst": 8,
+    "vip_agent": 7, "vip_care": 7,
+    "supervisor": 6, "care_supervisor": 6,
+    "care_l2": 5, "billing_agent": 5, "roaming_ops": 5,
+    "care_l1": 4, "noc_operator": 4, "field_technician": 4, "audit_viewer": 4,
+    "agent": 3,
+    "partner": 2, "b2b_partner": 2, "mvno_partner": 2,
+}
+
+def pick_role(roles):
+    best, best_p = None, -1
+    for r in (roles or []):
+        p = ROLE_PRIORITY.get(r, -1)
+        if p > best_p:
+            best, best_p = r, p
+    return best
 
 # ── App registry ──────────────────────────────────────────────────────────────
 # client_id must match Keycloak client AND the App ID registered in admin-service
@@ -135,7 +156,33 @@ def app_callback(app_key):
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=8,
     )
-    userinfo = ui_resp.json() if ui_resp.ok else {}
+    userinfo  = ui_resp.json() if ui_resp.ok else {}
+    user_role = pick_role(userinfo.get("roles", []))
+
+    # ── App-role gate: check OPA bundle before granting session ──────────────
+    app_id          = APPS[app_key]["client_id"]
+    allowed_roles   = None   # None = app not in registry → open
+    opa_check_error = None
+    try:
+        opa_resp = requests.get(
+            f"{OPA_URL}/v1/data/masking_config/app_roles",
+            timeout=3,
+        )
+        if opa_resp.ok:
+            app_roles_map = opa_resp.json().get("result", {})
+            if app_id in app_roles_map:
+                allowed_roles = app_roles_map[app_id]
+    except Exception as exc:
+        opa_check_error = str(exc)   # OPA down → fail open, log only
+
+    if allowed_roles is not None and user_role not in allowed_roles:
+        return render_template("denied.html",
+                               app_key=app_key,
+                               app_cfg=APPS[app_key],
+                               username=userinfo.get("preferred_username", "unknown"),
+                               user_role=user_role,
+                               allowed_roles=sorted(allowed_roles))
+
     session[f"{app_key}_token"]    = access_token
     session[f"{app_key}_id_token"] = token.get("id_token", "")
     session[f"{app_key}_user"]     = userinfo
