@@ -413,7 +413,8 @@ plugins:
           if unmask_token and unmask_token ~= "" and customer_id ~= "" then
               local gov_res, gov_err = httpc_gov:request_uri(
                   GOVERNANCE_URL .. "/unmask/validate/" .. unmask_token
-                  .. "?customer_id=" .. ngx.escape_uri(customer_id),
+                  .. "?customer_id=" .. ngx.escape_uri(customer_id)
+                  .. "&username="    .. ngx.escape_uri(claims.preferred_username or ""),
                   { method = "GET" }
               )
               if gov_res and gov_res.status == 200 then

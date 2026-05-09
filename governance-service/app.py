@@ -22,6 +22,7 @@ DATABASE_URL          = os.environ.get("DATABASE_URL", "postgresql://adminuser:a
 ADMIN_USER            = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS            = os.environ.get("ADMIN_PASSWORD", "admin123")
 LOG_DASHBOARD_URL     = os.environ.get("LOG_DASHBOARD_URL", "http://log-dashboard:9000/log")
+GOVERNANCE_API_KEY    = os.environ.get("GOVERNANCE_API_KEY", "governance-internal-key")
 
 UNMASK_REASON_CODES = [
     "FRAUD_INVESTIGATION",
@@ -149,8 +150,11 @@ def init_db():
             reviewed_at  TIMESTAMPTZ,
             reviewed_by  VARCHAR(255),
             expires_at   TIMESTAMPTZ,
-            first_used_at TIMESTAMPTZ
+            first_used_at TIMESTAMPTZ,
+            used_at      TIMESTAMPTZ
         )""",
+        # Migration: add used_at to existing tables
+        "ALTER TABLE unmask_sessions ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -740,7 +744,7 @@ def unmask_approve(token_id):
     execute(conn,
         """UPDATE unmask_sessions
            SET status='approved', reviewed_at=NOW(), reviewed_by=%s,
-               expires_at=NOW() + INTERVAL '2 hours'
+               expires_at=NOW() + INTERVAL '15 minutes'
            WHERE id=%s""",
         (ADMIN_USER, token_id))
     conn.commit()
@@ -772,25 +776,36 @@ def unmask_reject(token_id):
 
 @app.get("/unmask/validate/<token_id>")
 def unmask_validate(token_id):
-    """Kong calls this to check whether an unmask token is valid for the given customer."""
-    customer_id = request.args.get("customer_id", "")
+    """Kong calls this to validate an unmask token. Enforces T1: user binding + one-time-use."""
+    customer_id     = request.args.get("customer_id", "")
+    username_param  = request.args.get("username", "")
+
     conn = get_db()
+    # Must be approved, unexpired, unbound-to-customer, and not yet consumed
     row = qone(conn,
         """SELECT * FROM unmask_sessions
            WHERE id=%s AND status='approved'
              AND expires_at > NOW()
-             AND customer_id=%s""",
+             AND customer_id=%s
+             AND used_at IS NULL""",
         (token_id, customer_id))
     if not row:
         conn.close()
-        return jsonify({"valid": False})
+        return jsonify({"valid": False, "reason": "not_found_or_expired_or_consumed"})
 
-    # Record first use timestamp
-    if not row.get("first_used_at"):
-        execute(conn,
-            "UPDATE unmask_sessions SET first_used_at=NOW() WHERE id=%s",
-            (token_id,))
-        conn.commit()
+    # T1: user binding — token must belong to the caller
+    if username_param and row["username"] != username_param:
+        conn.close()
+        log_event("unmask_user_mismatch",
+                  {"token": token_id, "expected": row["username"], "got": username_param})
+        return jsonify({"valid": False, "reason": "user_mismatch"})
+
+    # T1: one-time-use — mark consumed immediately
+    execute(conn,
+        "UPDATE unmask_sessions SET used_at=NOW(), first_used_at=COALESCE(first_used_at,NOW()), "
+        "status='consumed' WHERE id=%s",
+        (token_id,))
+    conn.commit()
     conn.close()
 
     import json as _json
@@ -805,6 +820,80 @@ def unmask_validate(token_id):
         "reason_code": row["reason_code"],
         "username":    row["username"],
         "expires_at":  row["expires_at"].isoformat() if row["expires_at"] else None,
+    })
+
+
+# ── Internal API (called by frontend-hub) ────────────────────────────────────
+
+def _require_api_key():
+    if request.headers.get("X-Governance-API-Key") != GOVERNANCE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
+@app.post("/api/unmask/request")
+def api_unmask_request():
+    """Agent-facing endpoint: submit an unmask request from frontend-hub."""
+    denied = _require_api_key()
+    if denied:
+        return denied
+
+    import json as _json
+    data        = request.get_json(force=True) or {}
+    user_id     = (data.get("user_id")     or "").strip()
+    username    = (data.get("username")    or "").strip()
+    customer_id = (data.get("customer_id") or "").strip()
+    fields      = data.get("fields", [])
+    reason_code = (data.get("reason_code") or "").strip()
+    ticket_ref  = (data.get("ticket_ref")  or "").strip()
+    notes       = (data.get("notes")       or "").strip()
+
+    if not all([user_id, username, customer_id, reason_code]):
+        return jsonify({"error": "Missing required fields: user_id, username, customer_id, reason_code"}), 400
+    if reason_code not in UNMASK_REASON_CODES:
+        return jsonify({"error": f"Invalid reason_code. Valid: {UNMASK_REASON_CODES}"}), 400
+    if not isinstance(fields, list):
+        fields = []
+
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO unmask_sessions
+               (user_id, username, customer_id, fields, reason_code, ticket_ref, notes)
+               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (user_id, username, customer_id, _json.dumps(fields), reason_code, ticket_ref, notes))
+        token_id = str(cur.fetchone()[0])
+    conn.commit()
+    conn.close()
+
+    log_event("unmask_requested_api",
+              {"username": username, "customer_id": customer_id,
+               "reason_code": reason_code, "ticket_ref": ticket_ref, "fields": fields})
+    return jsonify({"token_id": token_id, "status": "pending"})
+
+
+@app.get("/api/unmask/status/<token_id>")
+def api_unmask_status(token_id):
+    """Agent polls this to check approval status of their unmask request."""
+    import json as _json
+    conn = get_db()
+    row  = qone(conn,
+        "SELECT id, status, expires_at, fields, reason_code, username, used_at "
+        "FROM unmask_sessions WHERE id=%s",
+        (token_id,))
+    conn.close()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    fields = row["fields"] if isinstance(row["fields"], list) else _json.loads(row["fields"] or "[]")
+    return jsonify({
+        "token_id":   str(row["id"]),
+        "status":     row["status"],
+        "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+        "fields":     fields,
+        "reason_code": row["reason_code"],
+        "username":   row["username"],
+        "consumed":   bool(row.get("used_at")),
     })
 
 

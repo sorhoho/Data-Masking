@@ -10,7 +10,7 @@
 
 <!-- Status filter tabs -->
 <ul class="nav nav-tabs mb-3">
-  {% for s in ['pending','approved','rejected'] %}
+  {% for s in ['pending','approved','consumed','rejected'] %}
   <li class="nav-item">
     <a class="nav-link {% if status == s %}active{% endif %}" href="/unmask?status={{ s }}">
       {{ s|capitalize }}
@@ -66,12 +66,13 @@
               <button class="btn btn-danger btn-sm">Reject</button>
             </form>
             {% elif row.status == 'approved' %}
-            <span class="badge badge-approved">Active</span>
-            {% if row.first_used_at %}
-              <small class="text-muted ms-1">used</small>
-            {% endif %}
+            <span class="badge bg-success">Active</span>
+            <small class="text-muted ms-1">15 min</small>
+            {% elif row.status == 'consumed' %}
+            <span class="badge bg-dark">Consumed</span>
+            <small class="text-muted ms-1">one-time used</small>
             {% else %}
-            <span class="badge badge-rejected">Rejected</span>
+            <span class="badge bg-danger">Rejected</span>
             {% endif %}
           </td>
         </tr>
@@ -88,7 +89,7 @@
 <div class="alert alert-info mt-3">
   <strong>How to use an approved token:</strong><br>
   Add the header <code>X-Unmask-Token: &lt;token-UUID&gt;</code> to the API call on <code>GET /api/customer/&lt;customer_id&gt;</code>.
-  The gateway will validate the token and expose the approved fields for that customer within the 2-hour window.
+  The gateway validates the token against the requesting user and customer. <strong>Token is single-use and expires 15 minutes after approval.</strong>
 </div>
 {% endif %}
 

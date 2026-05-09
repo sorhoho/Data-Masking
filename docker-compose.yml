@@ -83,6 +83,7 @@ services:
       ADMIN_USER: "admin"
       ADMIN_PASSWORD: "admin123"
       SECRET_KEY: "governance-secret-change-in-production"
+      GOVERNANCE_API_KEY: "governance-internal-key"
     depends_on:
       - postgres
       - keycloak
@@ -129,6 +130,8 @@ services:
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KONG_URL: "http://kong:8000"
       OPA_URL: "http://opa:8181"
+      GOVERNANCE_INTERNAL_URL: "http://governance-service:8889"
+      GOVERNANCE_API_KEY: "governance-internal-key"
       SECRET_KEY: "hub-secret-change-in-production"
     depends_on:
       - kong

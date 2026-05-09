@@ -17,9 +17,21 @@ else:
     KEYCLOAK_URL          = os.environ.get("KEYCLOAK_URL",          "http://localhost:8080")
     KEYCLOAK_INTERNAL_URL = os.environ.get("KEYCLOAK_INTERNAL_URL", "http://keycloak:8080")
 
-KONG_URL = os.environ.get("KONG_URL", "http://kong:8000")
-OPA_URL  = os.environ.get("OPA_URL",  "http://opa:8181")
-REALM    = "demo"
+KONG_URL                = os.environ.get("KONG_URL",                "http://kong:8000")
+OPA_URL                 = os.environ.get("OPA_URL",                 "http://opa:8181")
+GOVERNANCE_INTERNAL_URL = os.environ.get("GOVERNANCE_INTERNAL_URL", "http://governance-service:8889")
+GOVERNANCE_API_KEY      = os.environ.get("GOVERNANCE_API_KEY",      "governance-internal-key")
+REALM = "demo"
+
+UNMASK_REASON_CODES = [
+    "FRAUD_INVESTIGATION", "COMPLIANCE_AUDIT", "LEGAL_HOLD",
+    "CUSTOMER_DISPUTE", "TECHNICAL_ESCALATION", "REGULATOR_REQUEST",
+]
+
+UNMASK_FIELDS = [
+    "name", "msisdn", "email", "national_id", "address",
+    "last_call_duration", "data_roaming_gb", "last_location",
+]
 
 # Same priority table as Kong — used to pick effective role from JWT claims
 ROLE_PRIORITY = {
@@ -214,7 +226,9 @@ def app_home(app_key):
                            app_key=app_key,
                            app_cfg=APPS[app_key],
                            user=app_user(app_key),
-                           result=None, error=None)
+                           result=None, error=None,
+                           reason_codes=UNMASK_REASON_CODES,
+                           unmask_fields=UNMASK_FIELDS)
 
 
 @app.get("/<app_key>/lookup")
@@ -233,7 +247,9 @@ def app_lookup(app_key):
         return render_template("app.html",
                                app_key=app_key, app_cfg=APPS[app_key],
                                user=app_user(app_key),
-                               result=None, error="Customer ID or MSISDN required")
+                               result=None, error="Customer ID or MSISDN required",
+                               reason_codes=UNMASK_REASON_CODES,
+                               unmask_fields=UNMASK_FIELDS)
 
     headers = {"Authorization": f"Bearer {app_token(app_key)}"}
     if access_ref:
@@ -264,18 +280,89 @@ def app_lookup(app_key):
                                raw=result,
                                http_status=resp.status_code,
                                cid=cid, msisdn=msisdn, endpoint=endpoint,
-                               access_ref=access_ref)
+                               access_ref=access_ref,
+                               reason_codes=UNMASK_REASON_CODES,
+                               unmask_fields=UNMASK_FIELDS)
 
     except requests.exceptions.ConnectionError:
         return render_template("app.html",
                                app_key=app_key, app_cfg=APPS[app_key],
                                user=app_user(app_key),
-                               result=None, error="Cannot reach Kong API Gateway")
+                               result=None, error="Cannot reach Kong API Gateway",
+                               reason_codes=UNMASK_REASON_CODES,
+                               unmask_fields=UNMASK_FIELDS)
     except requests.exceptions.Timeout:
         return render_template("app.html",
                                app_key=app_key, app_cfg=APPS[app_key],
                                user=app_user(app_key),
-                               result=None, error="Request timed out")
+                               result=None, error="Request timed out",
+                               reason_codes=UNMASK_REASON_CODES,
+                               unmask_fields=UNMASK_FIELDS)
+
+
+# ── Unmask request / status ───────────────────────────────────────────────────
+
+@app.post("/<app_key>/unmask/request")
+def app_unmask_request(app_key):
+    if app_key not in APPS:
+        return "Unknown app", 404
+    if not app_token(app_key):
+        return redirect(url_for("app_login", app_key=app_key))
+
+    user        = app_user(app_key)
+    user_id     = user.get("sub", "")
+    username    = user.get("preferred_username", "unknown")
+    customer_id = request.form.get("customer_id", "").strip()
+    fields      = request.form.getlist("fields")
+    reason_code = request.form.get("reason_code", "").strip()
+    ticket_ref  = request.form.get("ticket_ref", "").strip()
+    notes       = request.form.get("notes", "").strip()
+
+    error = None
+    unmask_pending = None
+    unmask_customer_id = customer_id
+
+    try:
+        resp = requests.post(
+            f"{GOVERNANCE_INTERNAL_URL}/api/unmask/request",
+            headers={"X-Governance-API-Key": GOVERNANCE_API_KEY},
+            json={"user_id": user_id, "username": username,
+                  "customer_id": customer_id, "fields": fields,
+                  "reason_code": reason_code, "ticket_ref": ticket_ref,
+                  "notes": notes},
+            timeout=5,
+        )
+        if resp.ok:
+            unmask_pending = resp.json().get("token_id")
+        else:
+            error = f"Unmask request failed: {resp.json().get('error', resp.text)}"
+    except Exception as exc:
+        error = f"Cannot reach governance service: {exc}"
+
+    return render_template("app.html",
+                           app_key=app_key, app_cfg=APPS[app_key],
+                           user=app_user(app_key),
+                           result=None, error=error,
+                           unmask_pending=unmask_pending,
+                           unmask_customer_id=unmask_customer_id,
+                           reason_codes=UNMASK_REASON_CODES,
+                           unmask_fields=UNMASK_FIELDS)
+
+
+@app.get("/<app_key>/unmask/status/<token_id>")
+def app_unmask_status(app_key, token_id):
+    if app_key not in APPS:
+        return jsonify({"error": "Unknown app"}), 404
+    if not app_token(app_key):
+        return jsonify({"error": "not authenticated"}), 401
+    try:
+        resp = requests.get(
+            f"{GOVERNANCE_INTERNAL_URL}/api/unmask/status/{token_id}",
+            timeout=5,
+        )
+        return jsonify(resp.json()), resp.status_code
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
 
 
 if __name__ == "__main__":
