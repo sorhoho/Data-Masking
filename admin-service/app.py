@@ -137,25 +137,32 @@ _DEFAULT_FIELD_MAPPINGS = [
     ("billing", "roaming_gb",       "data_roaming_gb",    "L2"),
 ]
 
+# App ID = Keycloak client_id (azp JWT claim). Must match exactly.
 _DEFAULT_APPS = [
-    ("crm",     "CRM System",      "http://crm-mock:5000",     "Main CRM backend"),
-    ("billing", "Billing System",  "http://billing-mock:5001", "Billing backend"),
+    ("agent-portal",         "Agent Portal",          "", "Care agent & billing web app"),
+    ("supervisor-dashboard", "Supervisor Dashboard",   "", "Team lead & supervisor UI"),
+    ("fraud-console",        "Fraud Console",          "", "Fraud analyst investigation tool"),
+    ("audit-viewer-app",     "Audit Viewer",           "", "Compliance read-only portal"),
+    ("partner-api",          "Partner API",            "", "B2B/MVNO partner BFF"),
 ]
 
-# Roles allowed per app by default — matches existing policy intent
 _DEFAULT_APP_ROLES = [
-    # CRM: all internal roles (partners excluded from unmask paths by policy)
-    ("crm", "agent"), ("crm", "supervisor"), ("crm", "vip_agent"), ("crm", "admin"),
-    ("crm", "care_l1"), ("crm", "care_l2"), ("crm", "care_supervisor"),
-    ("crm", "noc_operator"), ("crm", "field_technician"), ("crm", "roaming_ops"),
-    ("crm", "billing_agent"), ("crm", "fraud_analyst"), ("crm", "compliance_officer"),
-    ("crm", "audit_viewer"), ("crm", "vip_care"), ("crm", "data_admin"),
-    ("crm", "partner"), ("crm", "b2b_partner"), ("crm", "mvno_partner"),
-    # Billing: financial roles + compliance + audit
-    ("billing", "billing_agent"), ("billing", "admin"), ("billing", "data_admin"),
-    ("billing", "fraud_analyst"), ("billing", "compliance_officer"),
-    ("billing", "audit_viewer"), ("billing", "supervisor"), ("billing", "care_supervisor"),
-    ("billing", "roaming_ops"),
+    # Agent Portal: front-line care + billing
+    ("agent-portal", "agent"), ("agent-portal", "care_l1"), ("agent-portal", "care_l2"),
+    ("agent-portal", "billing_agent"), ("agent-portal", "noc_operator"),
+    ("agent-portal", "field_technician"), ("agent-portal", "roaming_ops"),
+    # Supervisor Dashboard: supervisors + privileged ops
+    ("supervisor-dashboard", "supervisor"), ("supervisor-dashboard", "care_supervisor"),
+    ("supervisor-dashboard", "vip_agent"), ("supervisor-dashboard", "vip_care"),
+    ("supervisor-dashboard", "admin"), ("supervisor-dashboard", "data_admin"),
+    # Fraud Console: fraud & compliance only
+    ("fraud-console", "fraud_analyst"), ("fraud-console", "compliance_officer"),
+    ("fraud-console", "admin"), ("fraud-console", "data_admin"),
+    # Audit Viewer: audit + compliance read access
+    ("audit-viewer-app", "audit_viewer"), ("audit-viewer-app", "compliance_officer"),
+    ("audit-viewer-app", "admin"),
+    # Partner API: external partners only
+    ("partner-api", "partner"), ("partner-api", "b2b_partner"), ("partner-api", "mvno_partner"),
 ]
 
 

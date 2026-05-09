@@ -448,6 +448,7 @@ plugins:
                       method      = kong.request.get_method(),
                       customer_id = customer_id,
                       backend     = backend,
+                      app_id      = claims.azp or "",
                       ctx = {
                           in_working_hours = in_working_hours,
                           hour             = utc_hour,
@@ -508,6 +509,7 @@ plugins:
           kong.ctx.shared.req_msisdn     = req_msisdn
           kong.ctx.shared.channel        = channel
           kong.ctx.shared.purpose        = purpose
+          kong.ctx.shared.app_id         = claims.azp or ""
 
           kong.log.info(
               "Access granted: user=", claims.preferred_username,
@@ -710,6 +712,7 @@ plugins:
           local access_reference = kong.ctx.shared.access_reference
           local req_msisdn       = kong.ctx.shared.req_msisdn
           local backend          = kong.ctx.shared.backend or "unknown"
+          local app_id           = kong.ctx.shared.app_id or ""
           local customer_tier    = kong.ctx.shared.customer_tier or "standard"
           local channel          = kong.ctx.shared.channel or "web"
           local purpose          = kong.ctx.shared.purpose or ""
@@ -748,6 +751,7 @@ plugins:
                   method           = method,
                   path             = path,
                   backend          = backend,
+                  app_id           = app_id ~= "" and app_id or nil,
                   customer_id      = customer_id,
                   http_status      = status,
                   user             = username,

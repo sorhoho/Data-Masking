@@ -39,7 +39,7 @@
             <label class="form-label fw-semibold small" for="app_id">App ID</label>
             <input id="app_id" name="app_id" type="text" class="form-control"
                    placeholder="e.g. crm, billing, analytics" required autofocus />
-            <div class="form-text">Lowercase, used as OPA backend key</div>
+            <div class="form-text">Must match Keycloak <code>client_id</code> exactly — Kong reads this from JWT <code>azp</code> claim</div>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold small" for="name">Display Name</label>
@@ -63,9 +63,10 @@
 
     <div class="alert alert-secondary mt-3 small">
       <strong>How it works:</strong>
-      OPA checks <code>app_roles</code> from the bundle against <code>input.backend</code>
-      sent by Kong. If a role is not in the allowed list for that app, access is denied
-      even if the customer tier allows it. Apps not registered here default to open access.
+      Kong extracts <code>azp</code> from the JWT (Keycloak <code>client_id</code>) and
+      sends it as <code>input.app_id</code> to OPA. OPA checks the role against this app's
+      allowed list. Unregistered apps default to open access. App ID must match the
+      Keycloak client exactly.
     </div>
   </div>
 

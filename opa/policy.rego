@@ -103,19 +103,20 @@ premium_access_roles := {
     "field_technician", "audit_viewer",
 }
 
-# ── App registry (from bundle: allowed roles per backend) ────────────────────
+# ── App registry (from bundle: allowed roles per Keycloak client / azp) ──────
 
 app_roles_config := data.masking_config.app_roles if {
     data.masking_config.app_roles
 }
 default app_roles_config := {}
 
-# Pass if the backend has no registered role list (open), or role is in the list
+# Pass if calling app not registered (open), or role is in the app's allowed list
+# input.app_id = JWT azp claim (Keycloak client_id of the frontend / BFF)
 app_role_allowed if {
-    input.role in app_roles_config[input.backend]
+    input.role in app_roles_config[input.app_id]
 }
 app_role_allowed if {
-    not app_roles_config[input.backend]
+    not app_roles_config[input.app_id]
 }
 default app_role_allowed := false
 
