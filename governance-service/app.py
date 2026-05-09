@@ -1048,7 +1048,7 @@ def portal_login():
             import base64, json as _json
             payload = token_data["access_token"].split(".")[1]
             payload += "=" * (-len(payload) % 4)
-            claims = _json.loads(base64.b64decode(payload))
+            claims = _json.loads(base64.urlsafe_b64decode(payload))
 
             session["portal_user_id"] = claims["sub"]
             session["portal_username"] = claims.get("preferred_username", username)
