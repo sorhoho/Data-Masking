@@ -300,15 +300,17 @@ def kc_revoke_all_roles(user_id):
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 def log_event(event_type, details):
-    try:
-        requests.post(LOG_DASHBOARD_URL, json={
-            "service":   "governance-service",
-            "event":     event_type,
-            "details":   details,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }, timeout=2)
-    except Exception:
-        pass
+    def _send():
+        try:
+            requests.post(LOG_DASHBOARD_URL, json={
+                "service":   "governance-service",
+                "event":     event_type,
+                "details":   details,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, timeout=2)
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────

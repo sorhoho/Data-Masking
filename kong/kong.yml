@@ -408,7 +408,7 @@ plugins:
           local unmask_fields = {}
           local unmask_reason = nil
           local httpc_gov = http.new()
-          httpc_gov:set_timeout(3000)
+          httpc_gov:set_timeout(8000)
 
           if unmask_token and unmask_token ~= "" and customer_id ~= "" then
               local gov_res, gov_err = httpc_gov:request_uri(
