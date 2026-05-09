@@ -65,6 +65,15 @@
                  placeholder="For VIP" value="{{ access_ref or '' }}" />
         </div>
         <div class="col-md-2">
+          <label class="form-label small fw-semibold">
+            Unmask Token
+            <span class="badge bg-warning text-dark ms-1" style="font-size:.6rem">T1</span>
+          </label>
+          <input name="unmask_token" type="text" class="form-control font-monospace"
+                 id="unmask-token-field"
+                 placeholder="UUID from approved request" value="{{ unmask_token or '' }}" />
+        </div>
+        <div class="col-md-2">
           <button class="btn btn-{{ app_cfg.color }} w-100" type="submit">Lookup</button>
         </div>
       </form>
@@ -239,13 +248,15 @@ function checkUnmaskStatus(appKey, tokenId) {
     .then(r => r.json())
     .then(data => {
       if (data.status === 'approved') {
+        // Pre-fill the unmask token field and scroll to lookup form
+        var tf = document.getElementById('unmask-token-field');
+        if (tf) { tf.value = tokenId; tf.classList.add('border-success'); }
         out.innerHTML = '<div class="alert alert-success py-2 mb-0">' +
-          '&#10003; <strong>Approved!</strong> Re-lookup with this token: ' +
-          '<code>' + tokenId + '</code><br>' +
-          'Enter it in the <strong>X-Access-Reference</strong> field above and re-submit. ' +
-          'Add <code>X-Unmask-Token: ' + tokenId + '</code> as header. ' +
-          '<strong>One-time use · expires ' + (data.expires_at ? new Date(data.expires_at).toLocaleTimeString() : 'soon') + '</strong>' +
+          '&#10003; <strong>Approved!</strong> Token pre-filled in lookup form above. ' +
+          'Hit <strong>Lookup</strong> now — <strong>single-use · expires ' +
+          (data.expires_at ? new Date(data.expires_at).toLocaleTimeString() : 'soon') + '</strong>' +
           '</div>';
+        tf && tf.scrollIntoView({behavior:'smooth', block:'center'});
       } else if (data.status === 'consumed') {
         out.innerHTML = '<div class="alert alert-secondary py-2 mb-0">Token already consumed (one-time use). Request a new one.</div>';
       } else if (data.status === 'rejected') {

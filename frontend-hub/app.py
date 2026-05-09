@@ -238,10 +238,11 @@ def app_lookup(app_key):
     if not app_token(app_key):
         return redirect(url_for("app_login", app_key=app_key))
 
-    cid        = request.args.get("customer_id", "").strip()
-    msisdn     = request.args.get("msisdn", "").strip()
-    access_ref = request.args.get("ref", "").strip()
-    endpoint   = request.args.get("endpoint", "crm")  # crm | billing
+    cid          = request.args.get("customer_id", "").strip()
+    msisdn       = request.args.get("msisdn", "").strip()
+    access_ref   = request.args.get("ref", "").strip()
+    unmask_token = request.args.get("unmask_token", "").strip()
+    endpoint     = request.args.get("endpoint", "crm")  # crm | billing
 
     if not cid and not msisdn:
         return render_template("app.html",
@@ -254,6 +255,8 @@ def app_lookup(app_key):
     headers = {"Authorization": f"Bearer {app_token(app_key)}"}
     if access_ref:
         headers["X-Access-Reference"] = access_ref
+    if unmask_token:
+        headers["X-Unmask-Token"] = unmask_token
 
     try:
         if endpoint == "billing":
@@ -280,7 +283,7 @@ def app_lookup(app_key):
                                raw=result,
                                http_status=resp.status_code,
                                cid=cid, msisdn=msisdn, endpoint=endpoint,
-                               access_ref=access_ref,
+                               access_ref=access_ref, unmask_token=unmask_token,
                                reason_codes=UNMASK_REASON_CODES,
                                unmask_fields=UNMASK_FIELDS)
 
