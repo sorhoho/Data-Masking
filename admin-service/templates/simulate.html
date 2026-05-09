@@ -134,6 +134,19 @@
         <div class="alert alert-success py-2 small mb-2">No fields masked — full data visible</div>
         {% endif %}
 
+        {% if result.fired_rules %}
+        <div class="mb-3">
+          <div class="small fw-bold text-muted mb-1">&#9889; DYNAMIC RULES FIRED</div>
+          {% for rule_name in result.fired_rules %}
+          <span class="badge bg-primary me-1 mb-1">{{ rule_name }}</span>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-light border py-2 small mb-2">
+          <span class="text-muted">&#9889; No dynamic rules matched this context</span>
+        </div>
+        {% endif %}
+
         <details class="small">
           <summary class="text-muted" style="cursor:pointer">Raw OPA response</summary>
           <pre class="mt-2 p-2 bg-light rounded" style="font-size:.72rem">{{ result | tojson(indent=2) }}</pre>

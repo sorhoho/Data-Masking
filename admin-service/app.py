@@ -65,6 +65,25 @@ PURPOSES = [
     "legal_hold",
 ]
 
+TIERS    = ["standard", "premium", "vip", "risk"]
+CHANNELS = ["web", "ivr", "mobile", "api"]
+
+_DEFAULT_RULES = [
+    # (priority, name, roles, tiers, purposes, channels, in_working_hours, action, fields)
+    (1,  "VIP tier: roaming_ops can see location + data",
+     ["roaming_ops"], ["vip"], [], [], None, "unmask",
+     ["last_location", "data_roaming_gb"]),
+    (5,  "Premium fraud investigation: care_l2 full PII unmask",
+     ["care_l2"], ["premium"], ["fraud_investigation"], [], None, "unmask",
+     ["national_id", "address", "last_location"]),
+    (10, "Risk tier + out of hours: extra contact masking",
+     [], ["risk"], [], [], False, "mask",
+     ["msisdn", "email"]),
+    (20, "Billing dispute on premium: billing_agent sees national_id",
+     ["billing_agent"], ["premium"], ["billing_dispute"], [], None, "unmask",
+     ["national_id"]),
+]
+
 _DEFAULT_MASKS = [
     # ── Legacy roles ──────────────────────────────────────────────────────────
     ("agent", "name"), ("agent", "msisdn"), ("agent", "email"),
@@ -275,6 +294,20 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT '',
             UNIQUE(role, purpose, field)
         )""",
+        """CREATE TABLE IF NOT EXISTS masking_rules (
+            id                         SERIAL PRIMARY KEY,
+            name                       TEXT    NOT NULL,
+            priority                   INT     NOT NULL DEFAULT 100,
+            condition_roles            TEXT[]  NOT NULL DEFAULT '{}',
+            condition_tiers            TEXT[]  NOT NULL DEFAULT '{}',
+            condition_purposes         TEXT[]  NOT NULL DEFAULT '{}',
+            condition_channels         TEXT[]  NOT NULL DEFAULT '{}',
+            condition_in_working_hours BOOLEAN,
+            action                     TEXT    NOT NULL CHECK (action IN ('mask','unmask')),
+            fields                     TEXT[]  NOT NULL DEFAULT '{}',
+            enabled                    BOOLEAN NOT NULL DEFAULT true,
+            created_at                 TEXT    NOT NULL
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -345,6 +378,14 @@ def init_db():
             "INSERT INTO purpose_policies (role, purpose, field, created_at) VALUES (%s, %s, %s, %s)",
             [(r, p, f, now) for r, p, f in _default_purpose_policies],
         )
+    if not qone(conn, "SELECT 1 FROM masking_rules LIMIT 1"):
+        for priority, name, roles, tiers, purposes, channels, wh, action, fields in _DEFAULT_RULES:
+            execute(conn,
+                """INSERT INTO masking_rules
+                   (priority, name, condition_roles, condition_tiers, condition_purposes,
+                    condition_channels, condition_in_working_hours, action, fields, enabled, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
+                (priority, name, roles, tiers, purposes, channels, wh, action, fields, now))
     conn.commit()
     conn.close()
 
@@ -364,6 +405,11 @@ def get_config():
     )
     purpose_rows  = qrows(conn,
         "SELECT role, purpose, field FROM purpose_policies ORDER BY role, purpose, field"
+    )
+    rule_rows     = qrows(conn,
+        "SELECT id, name, priority, condition_roles, condition_tiers, condition_purposes, "
+        "condition_channels, condition_in_working_hours, action, fields, enabled "
+        "FROM masking_rules ORDER BY priority, id"
     )
     conn.close()
 
@@ -392,12 +438,29 @@ def get_config():
     for row in purpose_rows:
         purpose_overrides.setdefault(row["role"], {}).setdefault(row["purpose"], []).append(row["field"])
 
+    masking_rules = []
+    for row in rule_rows:
+        masking_rules.append({
+            "id":                         row["id"],
+            "name":                       row["name"],
+            "priority":                   row["priority"],
+            "condition_roles":            list(row["condition_roles"] or []),
+            "condition_tiers":            list(row["condition_tiers"] or []),
+            "condition_purposes":         list(row["condition_purposes"] or []),
+            "condition_channels":         list(row["condition_channels"] or []),
+            "condition_in_working_hours": row["condition_in_working_hours"],
+            "action":                     row["action"],
+            "fields":                     list(row["fields"] or []),
+            "enabled":                    row["enabled"],
+        })
+
     return {
         "customer_tiers":     customer_tiers,
         "role_masked_fields": role_masked_fields,
         "backends":           backends,
         "app_roles":          app_roles,
         "purpose_overrides":  purpose_overrides,
+        "masking_rules":      masking_rules,
     }
 
 
@@ -819,6 +882,79 @@ def simulate():
                            roles=ROLES, purposes=PURPOSES,
                            all_fields=all_fields, result=result,
                            error=error, form=form)
+
+
+# ── Dynamic rule engine ──────────────────────────────────────────────────────
+
+@app.get("/rules")
+@login_required
+def rules_list():
+    conn = get_db()
+    rules = qrows(conn, "SELECT * FROM masking_rules ORDER BY priority, id")
+    conn.close()
+    return render_template("rules.html", rules=rules,
+                           all_roles=ROLES, all_purposes=PURPOSES,
+                           all_fields=FIELDS, tiers=TIERS, channels=CHANNELS)
+
+
+@app.post("/rules/add")
+@login_required
+def rules_add():
+    name      = (request.form.get("name") or "").strip()
+    priority  = int(request.form.get("priority") or 100)
+    action    = (request.form.get("action") or "unmask").strip()
+    roles     = request.form.getlist("condition_roles")
+    tiers     = request.form.getlist("condition_tiers")
+    purposes  = request.form.getlist("condition_purposes")
+    channels  = request.form.getlist("condition_channels")
+    wh_val    = request.form.get("condition_in_working_hours", "any")
+    wh        = None if wh_val == "any" else (wh_val == "true")
+    fields    = request.form.getlist("fields")
+
+    if not name or not fields or action not in ("mask", "unmask"):
+        flash("Name, action, and at least one field are required", "danger")
+        return redirect(url_for("rules_list"))
+
+    conn = get_db()
+    try:
+        execute(conn,
+            """INSERT INTO masking_rules
+               (name, priority, condition_roles, condition_tiers, condition_purposes,
+                condition_channels, condition_in_working_hours, action, fields, enabled, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
+            (name, priority, roles, tiers, purposes, channels, wh, action, fields,
+             datetime.utcnow().isoformat()))
+        conn.commit()
+        flash(f"Rule '{name}' added — OPA will reload within 60s", "success")
+    except Exception as exc:
+        conn.rollback()
+        flash(f"Error: {exc}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for("rules_list"))
+
+
+@app.post("/rules/<int:rule_id>/toggle")
+@login_required
+def rules_toggle(rule_id):
+    conn = get_db()
+    execute(conn, "UPDATE masking_rules SET enabled = NOT enabled WHERE id = %s", (rule_id,))
+    conn.commit()
+    conn.close()
+    flash("Rule toggled — OPA will reload within 60s", "success")
+    return redirect(url_for("rules_list"))
+
+
+@app.post("/rules/<int:rule_id>/delete")
+@login_required
+def rules_delete(rule_id):
+    conn = get_db()
+    row = qone(conn, "SELECT name FROM masking_rules WHERE id = %s", (rule_id,))
+    execute(conn, "DELETE FROM masking_rules WHERE id = %s", (rule_id,))
+    conn.commit()
+    conn.close()
+    flash(f"Rule '{row['name'] if row else rule_id}' deleted", "success")
+    return redirect(url_for("rules_list"))
 
 
 # ── Manual OPA sync ───────────────────────────────────────────────────────────

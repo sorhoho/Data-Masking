@@ -66,6 +66,11 @@ purpose_overrides := data.masking_config.purpose_overrides if {
 }
 default purpose_overrides := {}
 
+masking_rules := data.masking_config.masking_rules if {
+    data.masking_config.masking_rules
+}
+default masking_rules := []
+
 # ── Customer tier ─────────────────────────────────────────────────────────────
 
 customer_tier := customer_tiers[input.customer_id] if {
@@ -236,6 +241,54 @@ _ctx_extra contains f if {
     f := {"account_balance", "bill_amount"}[_]
 }
 
+# ── Dynamic rule engine ───────────────────────────────────────────────────────
+
+_roles_match(roles) if { count(roles) == 0 }
+_roles_match(roles) if { input.role in roles }
+
+_tiers_match(tiers) if { count(tiers) == 0 }
+_tiers_match(tiers) if { customer_tier in tiers }
+
+_purposes_match(purposes) if { count(purposes) == 0 }
+_purposes_match(purposes) if { _purpose in purposes }
+
+_channels_match(channels) if { count(channels) == 0 }
+_channels_match(channels) if { _channel in channels }
+
+_wh_matches(rule) if { not is_boolean(rule.condition_in_working_hours) }
+_wh_matches(rule) if {
+    is_boolean(rule.condition_in_working_hours)
+    rule.condition_in_working_hours == _in_working_hours
+}
+
+_rule_matches(rule) if {
+    rule.enabled == true
+    _roles_match(rule.condition_roles)
+    _tiers_match(rule.condition_tiers)
+    _purposes_match(rule.condition_purposes)
+    _channels_match(rule.condition_channels)
+    _wh_matches(rule)
+}
+
+_dynrule_unmasked contains f if {
+    some rule in masking_rules
+    _rule_matches(rule)
+    rule.action == "unmask"
+    some f in rule.fields
+}
+
+_dynrule_masked contains f if {
+    some rule in masking_rules
+    _rule_matches(rule)
+    rule.action == "mask"
+    some f in rule.fields
+}
+
+_fired_rules contains rule.name if {
+    some rule in masking_rules
+    _rule_matches(rule)
+}
+
 # ── Effective masked fields (role baseline + context extras − token unlocks) ──
 
 _role_masked contains f if {
@@ -252,12 +305,21 @@ _effective_masked contains f if {
     _role_masked[f]
     not _token_unmasked[f]
     not _purpose_exempt[f]
+    not _dynrule_unmasked[f]
 }
 
 _effective_masked contains f if {
     _ctx_extra[f]
     not _token_unmasked[f]
     not _purpose_exempt[f]
+    not _dynrule_unmasked[f]
+}
+
+_effective_masked contains f if {
+    _dynrule_masked[f]
+    not _token_unmasked[f]
+    not _purpose_exempt[f]
+    not _dynrule_unmasked[f]
 }
 
 # ── Masked fields ─────────────────────────────────────────────────────────────
@@ -282,4 +344,5 @@ decision := {
     "customer_tier":  customer_tier,
     "masked_fields":  masked_fields,
     "backend_fields": backend_fields,
+    "fired_rules":    _fired_rules,
 }
