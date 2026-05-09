@@ -50,7 +50,7 @@
               <i class="bi bi-shield-check"></i> Roles
             </button>
             <form method="post" action="/apps/remove/{{ a['app_id'] }}"
-                  onsubmit="return confirm('Remove {{ a[\'app_id\'] }}? This revokes all role grants for this app.')">
+                  onsubmit="return confirm('Remove {{ a.app_id }}? This revokes all role grants for this app.')">
               <button class="btn-ms-danger py-1 px-2" style="font-size:.75rem">
                 <i class="bi bi-trash3"></i>
               </button>
