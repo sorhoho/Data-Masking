@@ -1,7 +1,9 @@
-# Data Masking PoC — Keycloak · Kong · OPA · Admin GUI
+# Data Masking PoC — Keycloak · Kong · OPA · Identity Governance
 
 A self-contained Docker Compose stack demonstrating **role-based PII masking enforced at the API
-gateway**, with a live admin console for policy management and multi-backend field alias support.
+gateway**, combined with an **identity governance layer** (access requests, access reviews,
+separation-of-duties, T1/T2 unmask approval) and a **multi-app frontend hub** with per-application
+OIDC clients and app-role enforcement.
 
 ---
 
@@ -10,69 +12,78 @@ gateway**, with a live admin console for policy management and multi-backend fie
 1. [Architecture](#architecture)
 2. [How it works end-to-end](#how-it-works-end-to-end)
 3. [Sequence diagrams](#sequence-diagrams)
-   - [Standard CRM request](#1-standard-crm-request)
-   - [VIP customer access](#2-vip-customer-access)
-   - [Unmask request](#3-unmask-request)
-   - [Billing subscriber lookup (alias masking)](#4-billing-subscriber-lookup)
-   - [Add subscription](#5-add-subscription)
-   - [Partner / M2M flow](#6-partner--m2m-flow)
 4. [Data classification](#data-classification)
 5. [Multi-backend field alias support](#multi-backend-field-alias-support)
 6. [Role-based masking policy](#role-based-masking-policy)
-7. [VIP customer controls](#vip-customer-controls)
-8. [Partner role](#partner-role)
-9. [Services](#services)
-10. [Quick start](#quick-start)
-11. [Demo users](#demo-users)
-12. [Test data](#test-data)
-13. [API reference](#api-reference)
-14. [Sample requests and responses](#sample-requests-and-responses)
-15. [OPA policy internals](#opa-policy-internals)
-16. [Admin GUI](#admin-gui)
-17. [Component map](#component-map)
-18. [Startup order](#startup-order)
-19. [Production notes](#production-notes)
+7. [Customer tier ABAC](#customer-tier-abac)
+8. [Context signals](#context-signals)
+9. [VIP customer controls](#vip-customer-controls)
+10. [Partner role](#partner-role)
+11. [Services](#services)
+12. [Portals and credentials](#portals-and-credentials)
+13. [Quick start](#quick-start)
+14. [Demo users](#demo-users)
+15. [Test data](#test-data)
+16. [API reference](#api-reference)
+17. [Sample requests and responses](#sample-requests-and-responses)
+18. [OPA policy internals](#opa-policy-internals)
+19. [Identity governance](#identity-governance)
+20. [Frontend hub](#frontend-hub)
+21. [Admin GUI](#admin-gui)
+22. [Component map](#component-map)
+23. [Startup order](#startup-order)
+24. [Production notes](#production-notes)
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Browser / API Client                                                   │
-│    │  1. OIDC login (auth-code flow) or client_credentials (partner)   │
-│    ▼                                                                    │
-│  Keycloak :8080  ──  issues RS256-signed JWTs  ──  backed by Postgres  │
-│                                                                         │
-│  Website :3000  (OIDC code flow, Flask)                                 │
-│    │  2. Bearer <JWT> on every backend request                          │
-│    ▼                                                                    │
-│  Kong Gateway :8000  (DB-less, Lua serverless plugins)                 │
-│    │  3. Verify JWT RS256 signature — fetch JWKS from Keycloak,        │
-│    │       cache per-worker (5-min TTL), match kid, verify signature   │
-│    │  4. Resolve MSISDN → customer_id  (CRM internal, if needed)       │
-│    │  5. Call OPA with role + customer_id + path + backend             │
-│    │       ◄── allow/deny  +  masked_fields  +  is_vip                 │
-│    │            +  backend_fields  (field alias registry)              │
-│    │  6. Enforce X-Access-Reference for VIP + fire alert               │
-│    │  7. Forward request                                                │
-│    │       ├─► CRM Mock     :5000  (canonical field names)             │
-│    │       └─► Billing Mock :5001  (aliased field names)               │
-│    │           ◄── raw JSON                                             │
-│    │  8. Two-pass response masking (Lua):                               │
-│    │       Pass 1 — canonical field names (msisdn, name, …)            │
-│    │       Pass 2 — backend aliases (mobilenum, subname, …)            │
-│    │  9. Audit log ─────────────────────────────► Log Dashboard :9000  │
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Browser / API Client                                                        │
+│    │  1. OIDC login (auth-code flow, per-app client) or client_credentials  │
 │    ▼                                                                         │
-│  Masked JSON → rendered in browser                                      │
-│                                                                         │
-│  Admin GUI :8888  ──  config stored in PostgreSQL :5432                 │
-│    VIP list · role-field matrix · backend field registry               │
-│    served as OPA bundle (GET /bundle/masking_config.tar.gz)            │
-│    OPA polls every 15–60 s — no manual push needed                     │
-│                                                                         │
-│  Log Dashboard :9000 ──► Loki :3100 ──► Grafana :3001 (dashboards)     │
-└─────────────────────────────────────────────────────────────────────────┘
+│  Keycloak :8080  ──  issues RS256-signed JWTs  ──  backed by Postgres       │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │  Frontend Hub :3001  (multi-app OIDC hub, Flask + Authlib)            │  │
+│  │  Five per-app OIDC clients: agent-portal, supervisor-dashboard,       │  │
+│  │  fraud-console, audit-viewer-app, partner-api                         │  │
+│  │    │  Bearer <JWT> on every backend call                              │  │
+│  └────────────────────────┬───────────────────────────────────────────────┘  │
+│                           │  (also: Website :3000 — standalone OIDC portal) │
+│                           ▼                                                  │
+│  Kong Gateway :8000  (DB-less, Lua serverless plugins)                      │
+│    │  Verify JWT RS256 — JWKS fetch + 5-min per-worker cache              │
+│    │  Detect backend (path prefix)                                         │
+│    │  Resolve MSISDN → customer_id  (best-effort, CRM internal)           │
+│    │  Call OPA with role + customer_id + path + backend + ctx             │
+│    │      ◄── allow/deny  +  masked_fields  +  is_vip                    │
+│    │           +  backend_fields  +  tier check                          │
+│    │  Enforce X-Access-Reference for VIP                                  │
+│    │  Enforce X-Unmask-Token for /api/unmask/* (T1/T2 gate)              │
+│    │      Validate token at Governance :8889 — single-use, 15-min TTL   │
+│    │  Forward request                                                     │
+│    │      ├─► CRM Mock     (internal, canonical field names)             │
+│    │      └─► Billing Mock (internal, aliased field names)               │
+│    │  Two-pass response masking (Lua)                                     │
+│    │      Pass 1 — canonical field names                                  │
+│    │      Pass 2 — backend alias names                                    │
+│    ▼                                                                         │
+│  Masked JSON → rendered in browser                                          │
+│                                                                              │
+│  Admin GUI :8888  ──  config stored in PostgreSQL :5432                     │
+│    Customer tiers · role-field matrix · backend field registry              │
+│    Application registry · app-role grants                                   │
+│    User lifecycle (onboard / role-change / offboard via Keycloak Admin API) │
+│    Served as OPA bundle  GET /bundle/masking_config.tar.gz                  │
+│    OPA polls every 15–60 s — no manual push needed                          │
+│                                                                              │
+│  Governance Service :8889  ──  Identity Governance (MS Entra-style)         │
+│    Role requests · Access reviews · Separation-of-Duties rules             │
+│    T2 unmask approval gate + T1 token hygiene (15-min, single-use)         │
+│    Self-service portal at /portal  (Keycloak OIDC login)                   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key design decisions
@@ -81,12 +92,14 @@ gateway**, with a live admin console for policy management and multi-backend fie
 |---|---|
 | JWT RS256 verified in Kong via JWKS | Full cryptographic signature check — no per-request Keycloak round-trip; JWKS cached 5 min per Kong worker; key rotation handled by invalidating cache on unknown `kid` |
 | OPA for masking decisions | Policy as code, live updates via Admin GUI without gateway restart |
-| Admin service as OPA bundle server | VIP list and masking rules are operational config, not code — served as a versioned gzip tarball; OPA polls every 15–60 s, no manual push after restart |
-| PostgreSQL for Admin Service and Keycloak | Durable, crash-safe storage; both services share a single Postgres instance with separate databases (`keycloak` and `admindb`) |
-| Backend field alias registry | One role × field matrix applies to all backends; alias mapping is data, not code |
+| Admin service as OPA bundle server | VIP list and masking rules are operational config, not code — served as a versioned gzip tarball; OPA polls every 15–60 s |
+| Customer tier ABAC | Four tiers (standard / premium / vip / risk) replace the old VIP boolean; tier-aware OPA rules restrict which roles can access which customers |
+| App-role gate | Each registered application carries an allowed-role list; OPA enforces it so a user with a valid token cannot access an app their role isn't registered for |
+| T1/T2 unmask security | T2: agent submits request via governance portal → supervisor approves → token issued. T1: token is single-use, 15-min TTL, bound to requesting user + customer. Prevents self-approval by design |
+| PostgreSQL for all stateful services | Keycloak, Admin Service, and Governance Service all share one Postgres instance with separate databases (`keycloak`, `admindb`) |
+| Backend field alias registry | One role × field matrix applies across all backends; alias mapping is data, not code |
 | Two-pass Lua masking | Pass 1 for canonical names, Pass 2 for backend-specific aliases with double-masking guard |
-| Loki + Grafana for audit log persistence | Audit events forwarded from Log Dashboard to Loki (fire-and-forget); Grafana pre-provisions 6 panels — VIP alerts, OPA denials, unmask requests, billing, errors |
-| CRM and Billing ports not exposed | All PII access must pass through Kong enforcement |
+| Non-blocking audit log | `log_event` runs in a daemon thread to prevent gateway timeouts — no synchronous call to an external log endpoint on the hot path |
 
 ---
 
@@ -97,29 +110,26 @@ Every request through Kong goes through a fixed pipeline of three phases.
 ### Phase 1 — Pre-function (access control, `kong.yml` → `pre-function`)
 
 1. **Extract Bearer token** from `Authorization` header — 401 if missing.
-2. **Verify JWT RS256 signature** — fetch JWKS from the internal Keycloak URL (`KEYCLOAK_INTERNAL_URL/realms/KEYCLOAK_REALM/protocol/openid-connect/certs`; defaults to `http://keycloak:8080/realms/demo/...`), cache per Kong worker for 5 minutes. Match the token's `kid`; on unknown `kid` invalidate cache and re-fetch once (key rotation). Convert the matching JWK to PEM via `resty.openssl.pkey`, then:
-   - **Realm check**: verify `iss` contains `/realms/demo` — guards against cross-realm token confusion regardless of hostname.
-   - **Signature check**: call `resty.jwt:verify_jwt_obj` with `lifetime_grace_period=10`. If `KEYCLOAK_ISSUER` env var is set, enforce it strictly; otherwise accept the token's own `iss` (safe — it is inside the signed payload). This lets the stack work on localhost, Cloud Shell, or any reverse-proxy environment without config changes.
-3. **Pick highest-priority role** from `realm_access.roles` (priority: admin > supervisor > vip_agent > agent/partner).
-4. **Detect backend** from path prefix (`/api/billing/*` → `"billing"`, everything else → `"crm"`).
-5. **Resolve MSISDN → customer_id** (for MSISDN-based routes) by calling CRM's internal `/api/resolve` endpoint. This gives OPA a stable customer_id for the VIP check.
-6. **Call OPA** with `{role, username, path, method, customer_id, backend}`. Receive `{allow, masked_fields, is_vip, backend_fields}`.
-7. **Enforce VIP rule**: if `is_vip=true` and `X-Access-Reference` header is missing → 400. If present, fire async alert to Log Dashboard.
-8. **Enforce unmask rule**: `/api/unmask/*` requires `X-Unmask-Reason` header, then rewrites upstream path to `/api/customer/*`.
-9. Store shared context (`masked_fields`, `backend_fields`, `user_role`, `is_vip`, …) in `kong.ctx.shared` for the masking phase.
+2. **Verify JWT RS256 signature** — fetch JWKS from `KEYCLOAK_INTERNAL_URL/realms/KEYCLOAK_REALM/protocol/openid-connect/certs`, cache per Kong worker for 5 minutes. Match `kid`; on unknown `kid` invalidate cache and re-fetch once. Convert the matching JWK to PEM via `resty.openssl.pkey`, then:
+   - **Realm check**: verify `iss` contains `/realms/demo`.
+   - **Signature check**: call `resty.jwt:verify_jwt_obj` with `lifetime_grace_period=10`.
+3. **Pick highest-priority role** from `realm_access.roles`.
+4. **Detect backend** from path prefix (`/api/billing/*` → `"billing"`, else → `"crm"`).
+5. **Resolve MSISDN → customer_id** (for MSISDN-based routes) by calling CRM `/api/resolve`.
+6. **Inject context signals** from request headers into `input.ctx` — `initiated_by`, `channel`, `session_type`, `purpose`, working-hours flag.
+7. **Call OPA** with `{role, username, path, method, customer_id, backend, ctx}`. Receive `{allow, masked_fields, is_vip, backend_fields}`.
+8. **Enforce VIP rule**: if `is_vip=true` and `X-Access-Reference` header is missing → 400.
+9. **Enforce unmask rule**: `/api/unmask/*` requires a valid `X-Unmask-Token` header. Kong calls `GET governance:8889/unmask/validate/<token>?customer_id=…&username=…`. Token must exist, be approved, not expired (15 min), not consumed, and be bound to the requesting user. On first valid use the token is atomically marked `consumed` (prevents replay).
+10. Store shared context (`masked_fields`, `backend_fields`, `user_role`, `is_vip`, …) in `kong.ctx.shared`.
 
 ### Phase 2 — Post-function (response masking, `kong.yml` → `post-function`)
 
 Buffer the full response body, then:
 
-1. **Pass 1** — iterate `MASKERS` (keyed by canonical field name) and mask any field listed in `masked_fields`.
-2. **Pass 2** — iterate `backend_fields` (the alias registry returned by OPA). For each entry where `backend_field != canonical_field` and the canonical is in `masked_fields`, apply the same masking function. The `!=` guard prevents double-masking on CRM responses where field names are already canonical.
+1. **Pass 1** — mask canonical field names listed in `masked_fields`.
+2. **Pass 2** — iterate `backend_fields` (alias registry from OPA). For each alias where `backend_field != canonical_field` and the canonical is in `masked_fields`, apply the same masking function.
 3. Append `_masking` metadata object to the JSON response.
-4. Fire async audit log event.
-
-### Phase 3 — Log (audit trail, `kong.yml` → `post-function.log`)
-
-Fire-and-forget POST to Log Dashboard containing: service, level, event type, path, backend, customer_id, role, OPA decision, masked field count, VIP flag, access reference, and MSISDN hint.
+4. Fire async audit log event (daemon thread — does not block response).
 
 ---
 
@@ -130,136 +140,103 @@ Fire-and-forget POST to Log Dashboard containing: service, level, event type, pa
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant W as Website :3000
+    participant FH as Frontend Hub :3001
     participant KC as Keycloak :8080
     participant K as Kong :8000
     participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
-    participant LD as Log Dashboard :9000
+    participant CRM as CRM Mock
 
-    B->>W: GET /customer/C002
-    W->>K: GET /api/customer/C002\nAuthorization: Bearer <JWT>
-    K->>K: Fetch JWKS (5-min cache, match kid)\nVerify RS256 signature + claims\nExtract role from realm_access.roles
-    K->>OPA: POST /v1/data/data_masking\n{role:"agent", customer_id:"C002",\n path:"/api/customer/C002", backend:"crm"}
-    OPA-->>K: {allow:true, is_vip:false,\n masked_fields:["name","msisdn","email",\n "national_id","address","last_call_duration",\n "data_roaming_gb","last_location"],\n backend_fields:{}}
+    B->>FH: GET /agent/customer/C002
+    FH->>K: GET /api/customer/C002\nAuthorization: Bearer <JWT>
+    K->>K: Fetch JWKS (5-min cache)\nVerify RS256 + claims\nExtract role
+    K->>OPA: POST /v1/data/data_masking/decision\n{role:"agent", customer_id:"C002", backend:"crm"}
+    OPA-->>K: {allow:true, masked_fields:[...8 fields...]}
     K->>CRM: GET /api/customer/C002
-    CRM-->>K: {id:"C002", name:"Siti Nurhaliza",\n msisdn:"+60198765432", ...}
-    K->>K: Pass 1: mask canonical fields\nname→"S*** N*******"\nmsisdn→"+6019****32"\nemail→"s*****i@email.com" ...
-    K->>LD: POST /log (audit, async)
-    K-->>W: {id:"C002", name:"S*** N*******",\n msisdn:"+6019****32", ...,\n _masking:{role:"agent", masked_fields:[...]}}
-    W-->>B: Render masked customer page
+    CRM-->>K: raw JSON
+    K->>K: Two-pass masking
+    K-->>FH: Masked JSON + _masking metadata
+    FH-->>B: Rendered page
 ```
 
-### 2. VIP customer access
+### 2. T2 unmask flow (full governance gate)
 
 ```mermaid
 sequenceDiagram
-    participant W as Website :3000
+    participant A as Agent (Frontend Hub)
+    participant FH as Frontend Hub :3001
+    participant GOV as Governance :8889
+    participant SUP as Supervisor (Governance UI)
+    participant K as Kong :8000
+    participant CRM as CRM Mock
+
+    A->>FH: POST /agent/unmask/request\n{customer_id:"C002", reason:"billing_dispute", fields:[...]}
+    FH->>GOV: POST /api/unmask/request\nX-Governance-API-Key: <key>
+    GOV-->>FH: {token_id:"<uuid>", status:"pending"}
+    FH-->>A: "Request submitted — awaiting T2 approval"
+
+    Note over SUP,GOV: Supervisor reviews in Governance Console
+    SUP->>GOV: POST /unmask/<uuid>/approve
+    GOV->>GOV: SET status='approved', expires_at=NOW()+15min
+
+    A->>FH: GET /agent/unmask/status/<uuid>
+    FH->>GOV: GET /api/unmask/status/<uuid>
+    GOV-->>FH: {status:"approved", token_id:"<uuid>"}
+    FH-->>A: Token ready — pre-fills lookup form
+
+    A->>FH: GET /agent/customer/C002\nX-Unmask-Token: <uuid>
+    FH->>K: GET /api/customer/C002\nX-Unmask-Token: <uuid>
+    K->>GOV: GET /unmask/validate/<uuid>?customer_id=C002&username=agent1
+    GOV->>GOV: Atomic: verify token → mark consumed (used_at=NOW(), status='consumed')
+    GOV-->>K: {valid:true, fields:[...]}
+    K->>CRM: GET /api/customer/C002
+    CRM-->>K: raw JSON
+    K->>K: masked_fields=[] — no masking
+    K-->>FH: Full unmasked data
+    FH-->>A: Rendered unmasked record
+```
+
+### 3. VIP customer access
+
+```mermaid
+sequenceDiagram
+    participant W as Client
     participant K as Kong :8000
     participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
-    participant LD as Log Dashboard :9000
+    participant CRM as CRM Mock
 
     Note over W,K: vip_agent role, customer C001 (VIP)
-
     W->>K: GET /api/customer/C001\nAuthorization: Bearer <VIP_JWT>
-    K->>OPA: POST /v1/data/data_masking\n{role:"vip_agent", customer_id:"C001", ...}
+    K->>OPA: {role:"vip_agent", customer_id:"C001", ...}
     OPA-->>K: {allow:true, is_vip:true, masked_fields:[]}
-    K->>K: is_vip=true → check X-Access-Reference header
-    alt Header missing
-        K-->>W: 400 {"message":"X-Access-Reference header\n is required for VIP customer access"}
-        W->>W: Render access-reference form
-        W->>K: GET /api/customer/C001\nX-Access-Reference: TICKET-2024-VIP-001
+    alt X-Access-Reference missing
+        K-->>W: 400 {"message":"X-Access-Reference header required"}
     end
-    K->>LD: POST /log {event:"vip_access_alert",\n customer_id:"C001", access_reference:"TICKET-2024-VIP-001"}\n(async, real-time alert)
+    W->>K: GET /api/customer/C001\nX-Access-Reference: TICKET-2024-VIP-001
     K->>CRM: GET /api/customer/C001
-    CRM-->>K: {id:"C001", name:"Ahmad bin Abdullah", ...}
-    K->>K: masked_fields=[] → no masking applied
-    K->>LD: POST /log (audit)
-    K-->>W: {id:"C001", name:"Ahmad bin Abdullah", ...,\n _masking:{is_vip:true, masked_fields:[]}}
-
-    Note over W,K: agent role attempting VIP access
-    W->>K: GET /api/customer/C001\nAuthorization: Bearer <AGENT_JWT>
-    K->>OPA: {role:"agent", customer_id:"C001", ...}
-    OPA-->>K: {allow:false, is_vip:true}
-    K-->>W: 403 {"message":"Access denied: VIP customer\n requires vip_agent or admin role"}
+    CRM-->>K: raw JSON
+    K-->>W: Full unmasked data + _masking:{is_vip:true, masked_fields:[]}
 ```
 
-### 3. Unmask request
+### 4. Billing subscriber lookup (alias masking)
 
 ```mermaid
 sequenceDiagram
-    participant W as Website :3000
+    participant W as Client
     participant K as Kong :8000
     participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
-    participant LD as Log Dashboard :9000
+    participant BL as Billing Mock
 
-    Note over W,K: supervisor role — /api/unmask rewrites to /api/customer upstream
-
-    W->>K: GET /api/unmask/C002\nAuthorization: Bearer <SUPER_JWT>\nX-Unmask-Reason: Billing dispute ref #4521
-    K->>K: Verify JWT RS256 → role="supervisor"
-    K->>OPA: POST /v1/data/data_masking\n{role:"supervisor", customer_id:"C002",\n path:"/api/unmask/C002", backend:"crm"}
-    OPA-->>K: {allow:true, is_vip:false, masked_fields:[]}
-    Note over K: OPA returns masked_fields=[] for /api/unmask path
-    K->>K: X-Unmask-Reason present ✓\nRewrite upstream path:\n/api/unmask/C002 → /api/customer/C002
-    K->>CRM: GET /api/customer/C002
-    CRM-->>K: {id:"C002", name:"Siti Nurhaliza", ...}
-    K->>K: masked_fields=[] → no masking
-    K->>LD: POST /log {event:"unmask_request",\n unmask_reason:"Billing dispute ref #4521", ...}
-    K-->>W: Full unmasked JSON + _masking:{masked_fields:[]}
-```
-
-### 4. Billing subscriber lookup
-
-```mermaid
-sequenceDiagram
-    participant W as Website :3000
-    participant K as Kong :8000
-    participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
-    participant BL as Billing Mock :5001
-    participant LD as Log Dashboard :9000
-
-    Note over W,K: agent role — billing backend uses aliased field names
-
-    W->>K: GET /api/billing/subscriber?msisdn=+60198765432\nAuthorization: Bearer <AGENT_JWT>
-    K->>K: Detect backend: path starts /api/billing → backend="billing"
-    K->>CRM: GET /api/resolve?msisdn=+60198765432\n(internal, best-effort for VIP check)
-    CRM-->>K: {customer_id:"C002"}
-    K->>OPA: POST /v1/data/data_masking\n{role:"agent", customer_id:"C002",\n backend:"billing", path:"/api/billing/subscriber"}
-    OPA-->>K: {allow:true, is_vip:false,\n masked_fields:["name","msisdn",...],\n backend_fields:{\n  "mobilenum":{canonical:"msisdn",classification:"L1"},\n  "subname":{canonical:"name",classification:"L1"},\n  "ic_num":{canonical:"national_id",classification:"L1"},\n  "billing_address":{canonical:"address",classification:"L1"},\n  "call_duration_s":{canonical:"last_call_duration",classification:"L2"},\n  "roaming_gb":{canonical:"data_roaming_gb",classification:"L2"}\n}}
+    W->>K: GET /api/billing/subscriber?msisdn=+60198765432
+    K->>K: backend="billing"
+    K->>OPA: {role:"agent", customer_id:"C002", backend:"billing"}
+    OPA-->>K: {allow:true, masked_fields:[...], backend_fields:{mobilenum,subname,...}}
     K->>BL: GET /api/billing/subscriber?msisdn=+60198765432
-    BL-->>K: {mobilenum:"+60198765432", subname:"Siti Nurhaliza", ic_num:"920720-10-8812",\n billing_address:"Block 7, Jalan Mawar...", call_duration_s:87, roaming_gb:0.0, ...}
-    K->>K: Pass 1: canonical fields — none present in billing response (no "msisdn" key)\nPass 2: aliases — mobilenum→mask_msisdn, subname→mask_name,\n         ic_num→mask_national_id, billing_address→mask_address,\n         call_duration_s→mask_redact, roaming_gb→mask_redact
-    K->>LD: POST /log (audit, backend="billing")
-    K-->>W: {mobilenum:"+6019****32", subname:"S*** N*******",\n ic_num:"92**************", billing_address:"*** (redacted)",\n call_duration_s:"***", roaming_gb:"***",\n _masking:{backend:"billing", masked_fields:[...]}}
+    BL-->>K: {mobilenum:"+60198765432", subname:"Siti Nurhaliza", ...}
+    K->>K: Pass 1: no canonical keys\nPass 2: aliases → masked
+    K-->>W: {mobilenum:"+6019****32", subname:"S*** N*******", ...}
 ```
 
-### 5. Add subscription
-
-```mermaid
-sequenceDiagram
-    participant W as Website :3000
-    participant K as Kong :8000
-    participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
-    participant LD as Log Dashboard :9000
-
-    W->>K: POST /api/subscription\nAuthorization: Bearer <JWT>\n{msisdn:"+60198765432", plan:"Postpaid 100GB"}
-    K->>K: Read body, extract msisdn
-    K->>CRM: GET /api/resolve?msisdn=+60198765432
-    CRM-->>K: {customer_id:"C002"}
-    K->>OPA: POST /v1/data/data_masking\n{role:"agent", customer_id:"C002",\n path:"/api/subscription", method:"POST"}
-    OPA-->>K: {allow:true, is_vip:false, masked_fields:[...]}
-    K->>CRM: POST /api/subscription\n{msisdn:"+60198765432", plan:"Postpaid 100GB"}
-    CRM-->>K: {subscription_id:"sub-<uuid>", customer_id:"C002",\n msisdn:"+60198765432", plan:"Postpaid 100GB",\n status:"active", activated_at:"2024-03-01T12:00:00"}
-    K->>K: Apply masking to response (msisdn masked for agent)
-    K->>LD: POST /log {event:"subscription_request", ...}
-    K-->>W: {subscription_id:"sub-...", customer_id:"C002",\n msisdn:"+6019****32", plan:"Postpaid 100GB",\n status:"active", _masking:{...}}
-```
-
-### 6. Partner / M2M flow
+### 5. Partner / M2M flow
 
 ```mermaid
 sequenceDiagram
@@ -267,52 +244,33 @@ sequenceDiagram
     participant KC as Keycloak :8080
     participant K as Kong :8000
     participant OPA as OPA :8181
-    participant CRM as CRM Mock :5000
 
-    P->>KC: POST /realms/demo/protocol/openid-connect/token\ngrant_type=client_credentials\nclient_id=partner-client&client_secret=<secret>
-    KC-->>P: {access_token:"<JWT with role=partner>", ...}
-
+    P->>KC: POST /token\ngrant_type=client_credentials\nclient_id=partner-client
+    KC-->>P: {access_token:"<JWT role=partner>"}
     P->>K: GET /api/customer/C002\nAuthorization: Bearer <PARTNER_JWT>
-    K->>K: Verify JWT RS256 → realm_access.roles=["partner"]
-    K->>OPA: {role:"partner", customer_id:"C002", path:"/api/customer/C002"}
-    OPA-->>K: {allow:true, is_vip:false,\n masked_fields:["name","msisdn","email","national_id",\n "address","last_call_duration","data_roaming_gb","last_location"]}
-    Note over OPA: Partner always gets full L1+L2 masking\nCannot access VIP customers\nCannot call /api/unmask
-    K->>CRM: GET /api/customer/C002
-    CRM-->>K: raw JSON
-    K->>K: Mask all 8 L1+L2 fields
+    K->>OPA: {role:"partner", customer_id:"C002"}
+    OPA-->>K: {allow:true, masked_fields:[...all L1+L2...]}
     K-->>P: Fully masked JSON
-
-    Note over P,K: Partner attempting VIP access
-    P->>K: GET /api/customer/C001
-    K->>OPA: {role:"partner", customer_id:"C001", ...}
-    OPA-->>K: {allow:false}  ← VIP customer, partner denied
-    K-->>P: 403 {"message":"Access denied by security policy"}
+    P->>K: GET /api/customer/C001  (VIP)
+    K->>OPA: {role:"partner", customer_id:"C001"}
+    OPA-->>K: {allow:false}
+    K-->>P: 403
 ```
 
 ---
 
 ## Data classification
 
-Fields are classified into two sensitivity levels. OPA returns the list of fields to mask per role;
-Kong applies the appropriate masking function.
-
-### L1 — Direct identifiers
-
-| Field (canonical) | Masking function | Example input | Example output |
-|---|---|---|---|
-| `name` | First letter of each word kept, rest starred | `Ahmad bin Abdullah` | `A**** b** A*******` |
-| `msisdn` | Country prefix kept, last 2 digits kept | `+60198765432` | `+6019****32` |
-| `email` | First + last char of local part kept | `siti@email.com` | `s***i@email.com` |
-| `national_id` | First 2 chars kept | `920720-10-8812` | `92************` |
-| `address` | Fully redacted | `Block 7, Jalan Mawar` | `*** (redacted)` |
-
-### L2 — Linkable / profiling data
-
-| Field (canonical) | Masking function | Example output |
-|---|---|---|
-| `last_call_duration` | Full redact | `***` |
-| `data_roaming_gb` | Full redact | `***` |
-| `last_location` | Full redact | `***` |
+| Field (canonical) | Class | Masking function | Example output |
+|---|:---:|---|---|
+| `name` | L1 | First letter per word, rest starred | `A**** b** A*******` |
+| `msisdn` | L1 | Country prefix + last 2 digits | `+6019****32` |
+| `email` | L1 | First + last char of local part | `s***i@email.com` |
+| `national_id` | L1 | First 2 chars | `92************` |
+| `address` | L1 | Full redact | `*** (redacted)` |
+| `last_call_duration` | L2 | Full redact | `***` |
+| `data_roaming_gb` | L2 | Full redact | `***` |
+| `last_location` | L2 | Full redact | `***` |
 
 ---
 
@@ -321,36 +279,6 @@ Kong applies the appropriate masking function.
 Different backend systems may name the same PII concept differently. The alias registry in the
 Admin GUI maps backend-specific field names to canonical names, allowing the same role × field
 masking matrix to apply across all backends.
-
-### How it works
-
-```
-Admin GUI
-  └─ field_mappings table (PostgreSQL)
-       billing/mobilenum → canonical:msisdn, L1
-       billing/subname   → canonical:name,   L1
-       ...
-       │
-       ▼ served as bundle: GET /bundle/masking_config.tar.gz
-OPA policy.rego
-  └─ backend_fields rule
-       input.backend = "billing"
-       → returns {mobilenum:{canonical:"msisdn",...}, subname:{canonical:"name",...}, ...}
-       │
-       ▼ returned in OPA response
-Kong post-function
-  └─ Pass 1: mask data["msisdn"] if present
-     Pass 2: for each alias where canon != bfield
-               if data["mobilenum"] present and "msisdn" in masked_fields
-                 apply mask_msisdn to data["mobilenum"]
-```
-
-### Registered backends (defaults)
-
-| Backend ID | Display name | Base URL | Notes |
-|---|---|---|---|
-| `crm` | CRM System | `http://crm-mock:5000` | Canonical field names — Pass 2 has no effect |
-| `billing` | Billing System | `http://billing-mock:5001` | Aliased field names — Pass 2 handles these |
 
 ### Billing field alias map
 
@@ -363,68 +291,93 @@ Kong post-function
 | `call_duration_s` | `last_call_duration` | L2 |
 | `roaming_gb` | `data_roaming_gb` | L2 |
 
-Adding a new backend only requires registering its field mappings in the Admin GUI. No OPA policy
-changes, no Kong plugin changes.
+Adding a new backend only requires registering its field mappings in the Admin GUI.
 
 ---
 
 ## Role-based masking policy
 
-Masking rules are live-configurable via the Admin GUI. The defaults:
+Masking rules are live-configurable via the Admin GUI at `/roles`. Defaults for key roles:
 
-| Field | Class | agent | supervisor | vip\_agent | admin | partner |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| `name` | L1 | masked | clear | clear | clear | masked |
-| `msisdn` | L1 | masked | masked | clear | clear | masked |
-| `email` | L1 | masked | clear | clear | clear | masked |
-| `national_id` | L1 | masked | masked | clear | clear | masked |
-| `address` | L1 | masked | clear | clear | clear | masked |
-| `last_call_duration` | L2 | masked | clear | clear | clear | masked |
-| `data_roaming_gb` | L2 | masked | clear | clear | clear | masked |
-| `last_location` | L2 | masked | clear | clear | clear | masked |
+| Field | agent | care\_l1 | care\_l2 | care\_sup | supervisor | billing\_agent | fraud\_analyst | vip\_agent | admin | partner |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `name` | ● | ● | ● | ● | ○ | ○ | ○ | ○ | ○ | ● |
+| `msisdn` | ● | ● | ● | ○ | ● | ○ | ○ | ○ | ○ | ● |
+| `email` | ● | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ● |
+| `national_id` | ● | ● | ● | ● | ● | ○ | ○ | ○ | ○ | ● |
+| `address` | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ● |
+| `last_call_duration` | ● | ● | ● | ○ | ○ | ○ | ○ | ○ | ○ | ● |
+| `data_roaming_gb` | ● | ● | ● | ○ | ○ | ● | ○ | ○ | ○ | ● |
+| `last_location` | ● | ● | ● | ● | ○ | ○ | ○ | ○ | ○ | ● |
+
+● = masked  ○ = clear (exact matrix is managed in the Admin GUI)
+
+---
+
+## Customer tier ABAC
+
+Four customer tiers replace the old VIP boolean. Tier is stored in the admin-service DB
+(`customer_tiers` table) and included in the OPA bundle. OPA cross-checks the requesting role
+against the customer's tier and denies access if the role is not permitted.
+
+| Tier | Permitted roles |
+|---|---|
+| `standard` | All standard + privileged + partner roles |
+| `premium` | care\_l2, care\_supervisor, billing\_agent, roaming\_ops, audit\_viewer + all privileged roles |
+| `vip` | Privileged roles only: vip\_agent, admin, fraud\_analyst, compliance\_officer, vip\_care, data\_admin |
+| `risk` | fraud\_analyst, compliance\_officer, care\_supervisor, data\_admin, admin only |
+
+Unassigned customers default to `standard`. VIP-tier customers still require `X-Access-Reference`
+(enforced in Kong; fires a real-time alert).
+
+---
+
+## Context signals
+
+Kong injects per-request context into `input.ctx` for OPA. All have safe defaults when the header
+is absent.
+
+| Header | OPA field | Default | Effect |
+|---|---|---|---|
+| *(time-based)* | `in_working_hours` | `true` | care\_l1/l2/billing\_agent see less contact data out-of-hours |
+| `X-Initiated-By` | `initiated_by` | `"customer"` | `"agent"` → care\_l2 loses MSISDN visibility |
+| `X-Channel` | `channel` | `"web"` | `"ivr"` → agent role masks name |
+| `X-Session-Type` | `session_type` | `"normal"` | `"readonly"` → billing/care\_l2 mask account\_balance + bill\_amount |
+| `X-Purpose` | `purpose` | `""` | Logged in audit; no masking effect yet |
 
 ---
 
 ## VIP customer controls
 
-Customers `C001` (Ahmad) and `C004` (Mei Ling) are flagged as VIP. Stronger controls apply:
+Customers `C001` (Ahmad) and `C004` (Mei Ling) are VIP (`vip` tier).
 
 | Role | VIP access |
 |---|---|
-| `agent` | 403 — blocked entirely |
-| `supervisor` | 403 — blocked entirely |
-| `vip_agent` | Allowed — must supply `X-Access-Reference` header on every request |
-| `admin` | Allowed — must supply `X-Access-Reference` header on every request |
-| `partner` | 403 — blocked entirely (M2M partners cannot access VIP data) |
+| `agent` / `care_l1` / `care_l2` | 403 — blocked |
+| `supervisor` / `care_supervisor` | 403 — blocked |
+| `vip_agent` / `vip_care` / `admin` | Allowed — must supply `X-Access-Reference` on every request |
+| `fraud_analyst` / `compliance_officer` / `data_admin` | Allowed — must supply `X-Access-Reference` |
+| `partner` / `b2b_partner` / `mvno_partner` | 403 — blocked |
 
-- **Real-time alert**: Kong fires a `vip_access_alert` event to the Log Dashboard immediately, before forwarding the request upstream.
-- **Audit trail**: Every VIP access is logged with username, role, reference, customer ID, and timestamp.
-- **Live config**: The VIP list is managed in the Admin GUI and takes effect on the next request — no restart needed.
+**Real-time alert**: Kong fires `vip_access_alert` before forwarding. Audit trail logged with
+username, role, reference, customer ID, and timestamp.
 
 ---
 
 ## Partner role
 
-The `partner` client uses **client credentials flow** (M2M — no human login). It receives full
-L1 + L2 masking on every field and has no path to unmask data.
+The `partner` client uses **client credentials flow** (M2M — no human login). Full L1+L2 masking
+always applied. Cannot access VIP/risk-tier customers, cannot call `/api/unmask`.
 
 ```bash
-# Obtain a partner token (client credentials)
 PARTNER_TOKEN=$(curl -s -X POST \
   http://localhost:8080/realms/demo/protocol/openid-connect/token \
   -d "client_id=partner-client&client_secret=partner-secret-456" \
-  -d "grant_type=client_credentials" \
-  | jq -r .access_token)
+  -d "grant_type=client_credentials" | jq -r .access_token)
 
-# Partner request — all PII masked
 curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
   http://localhost:8000/api/customer/C002 | jq
 ```
-
-Rules enforced at the OPA layer (cannot be bypassed even with valid tokens):
-- VIP customers → 403
-- `/api/unmask/*` → 403 (partner is excluded from the `allow` rule for unmask)
-- Full L1+L2 masking always applied
 
 ---
 
@@ -432,18 +385,73 @@ Rules enforced at the OPA layer (cannot be bypassed even with valid tokens):
 
 | Service | URL | Purpose |
 |---|---|---|
-| Website | http://localhost:3000 | Agent-facing CRM portal (OIDC login, search, VIP flow) |
-| Keycloak | http://localhost:8080 | Identity provider — OIDC, RS256 JWT issuer (backed by PostgreSQL) |
-| Kong Gateway | http://localhost:8000 | API gateway — JWT RS256 verify, OPA, masking, audit |
-| Kong Admin | http://localhost:8001 | Kong admin API (read-only metrics / config inspection) |
+| Frontend Hub | http://localhost:3001 | Multi-app OIDC hub — 5 per-app portals (agent, supervisor, fraud, audit, partner) |
+| Website | http://localhost:3000 | Standalone CRM portal (legacy, single OIDC client) |
+| Keycloak | http://localhost:8080 | Identity provider — OIDC, RS256 JWT issuer |
+| Kong Gateway | http://localhost:8000 | API gateway — JWT verify, OPA, masking, unmask validation |
+| Kong Admin | http://localhost:8001 | Kong admin API (metrics / config inspection) |
 | OPA | http://localhost:8181 | Policy engine — bundle mode, polls admin-service every 15–60 s |
-| Admin GUI | http://localhost:8888 | Live policy configuration (VIP, roles, backends) |
-| Log Dashboard | http://localhost:9000 | Real-time audit log viewer (forwards events to Loki) |
-| Loki | http://localhost:3100 | Log aggregation — persists audit events from Log Dashboard |
-| Grafana | http://localhost:3001 | Pre-built dashboards — VIP alerts, OPA denials, unmask, billing |
-| PostgreSQL | localhost:5432 | Persistent storage for Keycloak (`keycloak` DB) and Admin Service (`admindb`) |
-| CRM Mock | internal only | Raw customer data — canonical PII field names |
-| Billing Mock | internal only | Raw subscriber data — aliased PII field names |
+| Admin GUI | http://localhost:8888 | Masking policy, tiers, backends, apps, user lifecycle |
+| Governance Service | http://localhost:8889 | Identity governance console + self-service portal |
+| PostgreSQL | localhost:5432 | Keycloak (`keycloak` DB) + Admin Service + Governance (`admindb`) |
+| CRM Mock | internal only | Customer data (canonical PII field names) |
+| Billing Mock | internal only | Subscriber data (aliased PII field names) |
+
+---
+
+## Portals and credentials
+
+### Admin portals
+
+| Portal | URL | Username | Password | Notes |
+|---|---|---|---|---|
+| Keycloak Admin Console | http://localhost:8080/admin | `admin` | `admin` | Realm management, client secrets, user admin |
+| Admin GUI (masking policy) | http://localhost:8888 | `admin` | `admin123` | Tiers, roles, backends, apps, OPA bundle |
+| Governance Console | http://localhost:8889 | `admin` | `admin123` | Role requests, reviews, SoD, unmask approval |
+| Governance Self-Service Portal | http://localhost:8889/portal | *(any Keycloak user)* | *(user's password)* | Request roles, view own access history |
+| Frontend Hub | http://localhost:3001 | *(any Keycloak user)* | *(user's password)* | Per-app OIDC login |
+| Website (legacy) | http://localhost:3000 | *(any Keycloak user)* | *(user's password)* | Standalone portal |
+
+### Keycloak users
+
+**Privileged (no masking)**
+
+| Username | Password | Role | Access |
+|---|---|---|---|
+| `admin1` | `admin123` | `admin` | All customers, VIP with access reference |
+| `vip1` | `vip123` | `vip_agent` | All non-risk customers, VIP with access reference |
+| `vipcarer1` | `vipcarer1pw` | `vip_care` | VIP customers with access reference |
+| `fraud1` | `fraud1pw` | `fraud_analyst` | All tiers including risk; no masking |
+| `compliance1` | `compliance1pw` | `compliance_officer` | All tiers including risk; no masking |
+| `dataadmin1` | `dataadmin1pw` | `data_admin` | All tiers including risk; no masking |
+
+**Care team**
+
+| Username | Password | Role | Masking level |
+|---|---|---|---|
+| `care1` | `care1pw` | `care_l1` | Heavy — all 8 fields masked; standard/premium tiers only |
+| `care2` | `care2pw` | `care_l2` | Moderate — most PII masked; premium tier allowed |
+| `caresup1` | `caresup1pw` | `care_supervisor` | Light — name + contact visible; risk tier allowed |
+
+**Standard operations**
+
+| Username | Password | Role | Notes |
+|---|---|---|---|
+| `agent1` | `agent123` | `agent` | Full L1+L2 masking; standard tier only |
+| `supervisor1` | `super123` | `supervisor` | Partial masking (msisdn + national_id); VIP blocked |
+| `billing1` | `billing1pw` | `billing_agent` | Billing-focused; roaming masked |
+| `noc1` | `noc1pw` | `noc_operator` | Network ops; location/roaming masked |
+| `fieldtech1` | `fieldtech1pw` | `field_technician` | Field operations; contact + PII masked |
+| `roaming1` | `roaming1pw` | `roaming_ops` | Roaming ops; premium tier allowed |
+| `auditor1` | `auditor1pw` | `audit_viewer` | Read-only audit; premium tier allowed |
+
+**Partners (M2M / OIDC)**
+
+| Username / Client | Password / Secret | Role | Notes |
+|---|---|---|---|
+| `b2b1` | `b2b1pw` | `b2b_partner` | OIDC login; standard tier only; full masking |
+| `mvno1` | `mvno1pw` | `mvno_partner` | OIDC login; standard tier only; full masking |
+| `partner-client` (client creds) | `partner-secret-456` | `partner` | M2M; standard tier; full masking |
 
 ---
 
@@ -455,94 +463,49 @@ cd Data-Masking
 docker compose up --build
 ```
 
-First boot takes **3–4 minutes** — PostgreSQL initialises both databases (`keycloak` and `admindb`),
-Keycloak imports the `demo` realm, and the Admin Service seeds its tables before Kong starts.
-OPA receives its first bundle from the Admin Service within a few seconds of OPA coming up.
-Docker Compose enforces the startup order via healthchecks — nothing starts until its dependency
-is healthy.
+First boot takes **3–4 minutes** — PostgreSQL initialises both databases, Keycloak imports the
+`demo` realm, and the Admin Service seeds its tables before Kong starts. OPA receives its first
+bundle from the Admin Service within a few seconds of coming up.
 
-Once all containers are up, open **http://localhost:3000**.
+Once all containers are up:
+- **Frontend Hub** → http://localhost:3001
+- **Governance Console** → http://localhost:8889
+- **Admin GUI** → http://localhost:8888
+- **Legacy portal** → http://localhost:3000
 
 ---
 
 ## Demo users
 
-| Username | Password | Role | Notes |
-|---|---|---|---|
-| `agent1` | `agent123` | agent | Full L1+L2 masking; VIP blocked |
-| `supervisor1` | `super123` | supervisor | L1 partial (msisdn + national_id masked); VIP blocked |
-| `vip1` | `vip123` | vip\_agent | No masking; VIP allowed with access reference |
-| `admin1` | `admin123` | admin | No masking; VIP allowed with access reference |
+See [Portals and credentials](#portals-and-credentials) for the full user table with passwords
+and tier-access notes.
 
-**Admin GUI**: http://localhost:8888 — `admin / admin123`
-
----
-
-## Test data
-
-### CRM customers (canonical field names)
-
-| ID | Name | MSISDN | VIP | Notes |
-|---|---|---|---|---|
-| C001 | Ahmad bin Abdullah | +60123456789 | Yes | Requires access reference |
-| C002 | Siti Nurhaliza binti Tarudin | +60198765432 | No | Standard access |
-| C003 | Rajesh Kumar Sharma | +60112233445 | No | Suspended account |
-| C004 | Mei Ling Tan | +60167890123 | Yes | Requires access reference |
-
-### Billing subscribers (aliased field names)
-
-Same 4 people, exposed by the billing backend with different field names:
-
-| MSISDN | `subname` | `mobilenum` | Plan | Outstanding |
-|---|---|---|---|---|
-| +60123456789 | Ahmad bin Abdullah | +60123456789 | PP100 (Postpaid 100GB) | 0.00 |
-| +60198765432 | Siti Nurhaliza binti Tarudin | +60198765432 | PRE20 (Prepaid 20GB) | 5.50 |
-| +60112233445 | Rajesh Kumar Sharma | +60112233445 | PP50 (Postpaid 50GB) | 118.00 |
-| +60167890123 | Mei Ling Tan | +60167890123 | PP200 (Postpaid 200GB) | 0.00 |
-
----
-
-## API reference
-
-All endpoints require `Authorization: Bearer <token>`.
-
-| Method | Path | Backend | Description |
-|---|---|---|---|
-| GET | `/api/customer/{id}` | CRM | Fetch customer by ID — fields masked per role |
-| GET | `/api/customer?msisdn={msisdn}` | CRM | Fetch customer by MSISDN (Kong resolves → customer_id) |
-| GET | `/api/unmask/{id}` | CRM | Fetch fully unmasked record (requires `X-Unmask-Reason`) |
-| GET | `/api/billing/subscriber?msisdn={msisdn}` | Billing | Fetch billing subscriber — aliases masked per role |
-| POST | `/api/subscription` | CRM | Add a subscription (body: `{msisdn, plan}`) |
-
-### Request headers
-
-| Header | When required |
-|---|---|
-| `Authorization: Bearer <token>` | All requests |
-| `X-Unmask-Reason: <reason>` | `/api/unmask/*` only |
-| `X-Access-Reference: <ticket>` | Any request for a VIP customer |
-
----
-
-## Sample requests and responses
-
-Enable direct grants for CLI testing by adding `"directAccessGrantsEnabled": true` in
-`keycloak/realm-config.json` for `website-client`, then `docker compose up --build`.
+For quick CLI testing (enable `directAccessGrantsEnabled` in `keycloak/realm-config.json`
+for `website-client`):
 
 ```bash
-# ── Obtain tokens ──────────────────────────────────────────────────────────────
+# Agent token
 AGENT_TOKEN=$(curl -s -X POST \
   http://localhost:8080/realms/demo/protocol/openid-connect/token \
   -d "client_id=website-client&client_secret=website-secret-123" \
   -d "username=agent1&password=agent123&grant_type=password" \
   | jq -r .access_token)
 
+# Supervisor token
+SUPER_TOKEN=$(curl -s -X POST \
+  http://localhost:8080/realms/demo/protocol/openid-connect/token \
+  -d "client_id=website-client&client_secret=website-secret-123" \
+  -d "username=supervisor1&password=super123&grant_type=password" \
+  | jq -r .access_token)
+
+# VIP agent token
 VIP_TOKEN=$(curl -s -X POST \
   http://localhost:8080/realms/demo/protocol/openid-connect/token \
   -d "client_id=website-client&client_secret=website-secret-123" \
   -d "username=vip1&password=vip123&grant_type=password" \
   | jq -r .access_token)
 
+# Partner token (client credentials)
 PARTNER_TOKEN=$(curl -s -X POST \
   http://localhost:8080/realms/demo/protocol/openid-connect/token \
   -d "client_id=partner-client&client_secret=partner-secret-456" \
@@ -551,6 +514,77 @@ PARTNER_TOKEN=$(curl -s -X POST \
 ```
 
 ---
+
+## Test data
+
+### CRM customers
+
+| ID | Name | MSISDN | Tier | Notes |
+|---|---|---|---|---|
+| C001 | Ahmad bin Abdullah | +60123456789 | vip | Requires access reference |
+| C002 | Siti Nurhaliza binti Tarudin | +60198765432 | standard | Standard access |
+| C003 | Rajesh Kumar Sharma | +60112233445 | standard | Suspended account |
+| C004 | Mei Ling Tan | +60167890123 | vip | Requires access reference |
+
+### Billing subscribers (aliased field names)
+
+| MSISDN | `subname` | Plan | Outstanding |
+|---|---|---|---|
+| +60123456789 | Ahmad bin Abdullah | PP100 (Postpaid 100GB) | 0.00 |
+| +60198765432 | Siti Nurhaliza binti Tarudin | PRE20 (Prepaid 20GB) | 5.50 |
+| +60112233445 | Rajesh Kumar Sharma | PP50 (Postpaid 50GB) | 118.00 |
+| +60167890123 | Mei Ling Tan | PP200 (Postpaid 200GB) | 0.00 |
+
+---
+
+## API reference
+
+All Kong endpoints require `Authorization: Bearer <token>`.
+
+### Kong gateway endpoints
+
+| Method | Path | Backend | Description |
+|---|---|---|---|
+| GET | `/api/customer/{id}` | CRM | Fetch customer by ID — fields masked per role + tier |
+| GET | `/api/customer?msisdn={msisdn}` | CRM | Fetch customer by MSISDN |
+| GET | `/api/unmask/{id}` | CRM | Fetch unmasked record (requires valid `X-Unmask-Token`) |
+| GET | `/api/billing/subscriber?msisdn={msisdn}` | Billing | Fetch billing subscriber — aliases masked per role |
+| POST | `/api/subscription` | CRM | Add a subscription (`{msisdn, plan}`) |
+
+### Kong request headers
+
+| Header | When required |
+|---|---|
+| `Authorization: Bearer <token>` | All requests |
+| `X-Unmask-Token: <uuid>` | `/api/unmask/*` only — issued by Governance after T2 approval |
+| `X-Access-Reference: <ticket>` | Any request for a VIP-tier customer |
+| `X-Initiated-By: agent` | Optional — shifts care\_l2 MSISDN masking |
+| `X-Channel: ivr` | Optional — shifts agent name masking |
+| `X-Session-Type: readonly` | Optional — adds account balance masking |
+
+### Governance service endpoints
+
+Internal (used by frontend-hub, not exposed publicly without API key):
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/unmask/request` | Submit unmask request (X-Governance-API-Key required) |
+| GET | `/api/unmask/status/<token_id>` | Poll approval status |
+| GET | `/unmask/validate/<token_id>` | Kong calls this — validates + consumes token atomically |
+
+Self-service portal (Keycloak OIDC login):
+
+| Path | Description |
+|---|---|
+| `/portal` | Redirect to login |
+| `/portal/login` | Login form |
+| `/portal/dashboard` | My roles + request history + new request form |
+| `/portal/request` | POST — submit role request |
+| `/portal/logout` | Sign out |
+
+---
+
+## Sample requests and responses
 
 ### GET /api/customer/C002 — agent role
 
@@ -576,8 +610,8 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
   "_masking": {
     "applied": true,
     "role": "agent",
-    "masked_fields": ["name", "msisdn", "email", "national_id", "address",
-                      "last_call_duration", "data_roaming_gb", "last_location"],
+    "masked_fields": ["name","msisdn","email","national_id","address",
+                      "last_call_duration","data_roaming_gb","last_location"],
     "gateway": "kong-opa",
     "is_vip": false,
     "backend": "crm"
@@ -590,17 +624,11 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
 ### GET /api/customer/C002 — supervisor role
 
 ```bash
-SUPER_TOKEN=$(curl -s -X POST \
-  http://localhost:8080/realms/demo/protocol/openid-connect/token \
-  -d "client_id=website-client&client_secret=website-secret-123" \
-  -d "username=supervisor1&password=super123&grant_type=password" \
-  | jq -r .access_token)
-
 curl -s -H "Authorization: Bearer $SUPER_TOKEN" \
   http://localhost:8000/api/customer/C002 | jq
 ```
 
-**Response (200)** — supervisor sees name, email, address; msisdn and national_id still masked
+**Response (200)** — supervisor sees name, email, address; msisdn + national\_id masked
 ```json
 {
   "id": "C002",
@@ -617,7 +645,7 @@ curl -s -H "Authorization: Bearer $SUPER_TOKEN" \
   "_masking": {
     "applied": true,
     "role": "supervisor",
-    "masked_fields": ["msisdn", "national_id"],
+    "masked_fields": ["msisdn","national_id"],
     "gateway": "kong-opa",
     "is_vip": false,
     "backend": "crm"
@@ -627,41 +655,9 @@ curl -s -H "Authorization: Bearer $SUPER_TOKEN" \
 
 ---
 
-### GET /api/customer/C001 — agent blocked on VIP
+### GET /api/customer/C001 — vip\_agent with access reference
 
 ```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" \
-  http://localhost:8000/api/customer/C001 | jq
-```
-
-**Response (403)**
-```json
-{
-  "error": true,
-  "message": "Access denied: VIP customer requires vip_agent or admin role"
-}
-```
-
----
-
-### GET /api/customer/C001 — vip_agent with access reference
-
-```bash
-# Missing header — Kong blocks before calling upstream
-curl -s -H "Authorization: Bearer $VIP_TOKEN" \
-  http://localhost:8000/api/customer/C001 | jq
-```
-
-**Response (400)**
-```json
-{
-  "error": true,
-  "message": "X-Access-Reference header is required for VIP customer access"
-}
-```
-
-```bash
-# With access reference — full unmasked data (vip_agent has empty masked_fields)
 curl -s \
   -H "Authorization: Bearer $VIP_TOKEN" \
   -H "X-Access-Reference: TICKET-2024-VIP-001" \
@@ -679,9 +675,6 @@ curl -s \
   "address": "No. 12, Jalan Ampang, 50450 Kuala Lumpur",
   "plan": "Postpaid 100GB",
   "status": "active",
-  "last_call_duration": 342,
-  "data_roaming_gb": 1.2,
-  "last_location": "Kuala Lumpur",
   "_masking": {
     "applied": true,
     "role": "vip_agent",
@@ -695,50 +688,6 @@ curl -s \
 
 ---
 
-### GET /api/unmask/C002 — supervisor role
-
-```bash
-curl -s \
-  -H "Authorization: Bearer $SUPER_TOKEN" \
-  -H "X-Unmask-Reason: Billing dispute ref #4521" \
-  http://localhost:8000/api/unmask/C002 | jq
-```
-
-**Response (200)** — OPA returns `masked_fields=[]` for `/api/unmask` path
-```json
-{
-  "id": "C002",
-  "name": "Siti Nurhaliza binti Tarudin",
-  "msisdn": "+60198765432",
-  "email": "siti@email.com",
-  "national_id": "920720-10-8812",
-  "address": "Block 7, Jalan Mawar, 40150 Shah Alam",
-  "plan": "Prepaid 20GB",
-  "status": "active",
-  "last_call_duration": 87,
-  "data_roaming_gb": 0.0,
-  "last_location": "Shah Alam",
-  "_masking": {
-    "applied": true,
-    "role": "supervisor",
-    "masked_fields": [],
-    "gateway": "kong-opa",
-    "is_vip": false,
-    "backend": "crm"
-  }
-}
-```
-
-**Without X-Unmask-Reason (400)**
-```json
-{
-  "error": true,
-  "message": "X-Unmask-Reason header is required for data unmasking"
-}
-```
-
----
-
 ### GET /api/billing/subscriber — agent role (alias masking)
 
 ```bash
@@ -747,7 +696,7 @@ curl -s \
   "http://localhost:8000/api/billing/subscriber?msisdn=+60198765432" | jq
 ```
 
-**Response (200)** — billing aliases masked via Pass 2; non-PII fields (account_type, outstanding_bill, …) are untouched
+**Response (200)**
 ```json
 {
   "mobilenum": "+6019****32",
@@ -757,17 +706,14 @@ curl -s \
   "account_type": "prepaid",
   "plan_code": "PRE20",
   "outstanding_bill": 5.5,
-  "last_bill_date": "2024-02-28",
-  "data_usage_gb": 18.1,
   "call_duration_s": "***",
   "roaming_gb": "***",
   "_masking": {
     "applied": true,
     "role": "agent",
-    "masked_fields": ["name", "msisdn", "email", "national_id", "address",
-                      "last_call_duration", "data_roaming_gb", "last_location"],
+    "masked_fields": ["name","msisdn","email","national_id","address",
+                      "last_call_duration","data_roaming_gb","last_location"],
     "gateway": "kong-opa",
-    "is_vip": false,
     "backend": "billing"
   }
 }
@@ -775,70 +721,38 @@ curl -s \
 
 ---
 
-### POST /api/subscription — add subscription
+### GET /api/unmask/C002 — with approved token
 
 ```bash
-curl -s -X POST \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"msisdn": "+60198765432", "plan": "Postpaid 100GB"}' \
-  http://localhost:8000/api/subscription | jq
+# After T2 approval, UNMASK_TOKEN is the UUID returned by the governance service
+curl -s \
+  -H "Authorization: Bearer $SUPER_TOKEN" \
+  -H "X-Unmask-Token: $UNMASK_TOKEN" \
+  http://localhost:8000/api/unmask/C002 | jq
 ```
 
-**Response (200)**
-```json
-{
-  "subscription_id": "sub-3a7f2b1c-9e4d-48a0-b123-dc9a0e7f1234",
-  "customer_id": "C002",
-  "msisdn": "+6019****32",
-  "plan": "Postpaid 100GB",
-  "status": "active",
-  "activated_at": "2024-03-01T12:34:56",
-  "_masking": {
-    "applied": true,
-    "role": "agent",
-    "masked_fields": ["name", "msisdn", "email", "national_id", "address",
-                      "last_call_duration", "data_roaming_gb", "last_location"],
-    "gateway": "kong-opa",
-    "is_vip": false,
-    "backend": "crm"
-  }
-}
-```
-
----
-
-### Partner — full L1+L2 masking (M2M)
-
-```bash
-curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
-  http://localhost:8000/api/customer/C002 | jq
-```
-
-**Response (200)** — all 8 L1+L2 fields masked, same as agent
+**Response (200)** — full unmasked data; token is consumed immediately (single-use)
 ```json
 {
   "id": "C002",
-  "name": "S*** N********* b**** T******",
-  "msisdn": "+6019****32",
-  "email": "s***i@email.com",
-  "national_id": "92************",
-  "address": "*** (redacted)",
-  "plan": "Prepaid 20GB",
-  "status": "active",
-  "last_call_duration": "***",
-  "data_roaming_gb": "***",
-  "last_location": "***",
+  "name": "Siti Nurhaliza binti Tarudin",
+  "msisdn": "+60198765432",
+  "email": "siti@email.com",
+  "national_id": "920720-10-8812",
+  "address": "Block 7, Jalan Mawar, 40150 Shah Alam",
   "_masking": {
     "applied": true,
-    "role": "partner",
-    "masked_fields": ["name", "msisdn", "email", "national_id", "address",
-                      "last_call_duration", "data_roaming_gb", "last_location"],
+    "role": "supervisor",
+    "masked_fields": [],
     "gateway": "kong-opa",
-    "is_vip": false,
-    "backend": "crm"
+    "unmask_token_consumed": true
   }
 }
+```
+
+**Without X-Unmask-Token (401)**
+```json
+{"error": true, "message": "X-Unmask-Token header required for /api/unmask/* paths"}
 ```
 
 ---
@@ -848,42 +762,33 @@ curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
 **Policy file**: `opa/policy.rego`  
 **Runtime config**: `opa/opa-config.yaml`
 
-OPA runs in **v0-compatible mode** (`--v0-compatible`) with **bundle mode** enabled.
-The masking config is not baked into the policy — the Admin Service serves it as a gzip tarball
-at `GET /bundle/masking_config.tar.gz`. OPA polls every 15–60 seconds, so changes made via the
-Admin GUI automatically take effect without a manual sync. **Decision logging** is enabled
-(`decision_logs.console: true`) — every policy evaluation is emitted as structured JSON to
-stdout, captured by Docker and queryable via Loki/Grafana.
+OPA runs in native v1 mode (`import rego.v1`) in **bundle mode**. The masking config is served
+as a gzip tarball at `GET /bundle/masking_config.tar.gz` by the admin-service; OPA polls every
+15–60 seconds. Changes via the Admin GUI automatically take effect without a restart.
 
-### Data shape served by admin-service bundle
+### Data shape served by bundle
 
 ```json
 {
-  "vip_customers": {
-    "C001": true,
-    "C004": true
-  },
+  "vip_customers": {"C001": true, "C004": true},
+  "customer_tiers": {"C001": "vip", "C004": "vip", "C003": "standard"},
   "role_masked_fields": {
-    "agent":      ["name", "msisdn", "email", "national_id", "address",
-                   "last_call_duration", "data_roaming_gb", "last_location"],
-    "supervisor": ["msisdn", "national_id"],
+    "agent":      ["name","msisdn","email","national_id","address",
+                   "last_call_duration","data_roaming_gb","last_location"],
+    "supervisor": ["msisdn","national_id"],
     "vip_agent":  [],
-    "admin":      [],
-    "partner":    ["name", "msisdn", "email", "national_id", "address",
-                   "last_call_duration", "data_roaming_gb", "last_location"]
+    "admin":      []
+  },
+  "app_roles": {
+    "agent-portal":          ["agent","care_l1","care_l2","care_supervisor","billing_agent"],
+    "supervisor-dashboard":  ["supervisor","care_supervisor","vip_agent","vip_care"],
+    "fraud-console":         ["fraud_analyst","compliance_officer","data_admin","admin"],
+    "audit-viewer-app":      ["audit_viewer","compliance_officer","admin"]
   },
   "backends": {
-    "crm": {
-      "msisdn":             {"canonical": "msisdn",             "classification": "L1"},
-      "name":               {"canonical": "name",               "classification": "L1"}
-    },
     "billing": {
-      "mobilenum":          {"canonical": "msisdn",             "classification": "L1"},
-      "subname":            {"canonical": "name",               "classification": "L1"},
-      "ic_num":             {"canonical": "national_id",        "classification": "L1"},
-      "billing_address":    {"canonical": "address",            "classification": "L1"},
-      "call_duration_s":    {"canonical": "last_call_duration", "classification": "L2"},
-      "roaming_gb":         {"canonical": "data_roaming_gb",    "classification": "L2"}
+      "mobilenum": {"canonical":"msisdn","classification":"L1"},
+      "subname":   {"canonical":"name","classification":"L1"}
     }
   }
 }
@@ -892,28 +797,29 @@ stdout, captured by Docker and queryable via Loki/Grafana.
 ### Key rules
 
 ```rego
-# Allow regular roles only for non-VIP customers
-allow {
-    input.role == "agent"
-    not vip_customers[input.customer_id]
+# Customer tier gate
+tier_allowed {
+    tier := data.masking_config.customer_tiers[input.customer_id]
+    tier_roles[tier][input.role]
 }
 
-# Partner: allowed for non-VIP, non-unmask paths
-allow {
-    input.role == "partner"
-    not vip_customers[input.customer_id]
-    not startswith(input.path, "/api/unmask")
+# App-role gate: pass if no role list registered OR role is in list
+app_role_allowed {
+    not data.masking_config.app_roles[input.app_id]
+}
+app_role_allowed {
+    input.role in data.masking_config.app_roles[input.app_id]
 }
 
-# masked_fields = [] on the unmask path (caller explicitly requested full data)
-masked_fields = [] {
-    startswith(input.path, "/api/unmask")
+# Effective allow combines all gates
+effective_allow {
+    allow
+    tier_allowed
+    app_role_allowed
 }
 
-# backend_fields returns the alias registry for the requesting backend
-backend_fields = f {
-    f := data.masking_config.backends[input.backend]
-}
+# masked_fields = [] on unmask path (Kong validates token before reaching here)
+masked_fields = [] { startswith(input.path, "/api/unmask") }
 ```
 
 ### OPA input / output contract
@@ -927,43 +833,124 @@ backend_fields = f {
     "path":        "/api/customer/C002",
     "method":      "GET",
     "customer_id": "C002",
-    "backend":     "crm"
+    "backend":     "crm",
+    "app_id":      "agent-portal",
+    "ctx": {
+      "in_working_hours": true,
+      "initiated_by":     "customer",
+      "channel":          "web",
+      "session_type":     "normal",
+      "purpose":          ""
+    }
   }
 }
 ```
 
-**Output (OPA → Kong)** — `result` key
+**Output (OPA → Kong)**
 ```json
 {
   "result": {
     "allow":          true,
     "is_vip":         false,
-    "masked_fields":  ["name", "msisdn", "email", "national_id", "address",
-                       "last_call_duration", "data_roaming_gb", "last_location"],
-    "backend_fields": {
-      "msisdn": {"canonical": "msisdn", "classification": "L1"},
-      "name":   {"canonical": "name",   "classification": "L1"}
-    }
+    "masked_fields":  ["name","msisdn","email","national_id","address",
+                       "last_call_duration","data_roaming_gb","last_location"],
+    "backend_fields": {"mobilenum":{"canonical":"msisdn","classification":"L1"}}
   }
 }
 ```
 
 ---
 
+## Identity governance
+
+The Governance Service (`:8889`) provides an MS Entra ID Governance-style console for managing
+the identity lifecycle of the data masking platform. It runs as a standalone Flask app backed
+by the shared PostgreSQL instance.
+
+### Console pages (admin login: `admin` / `admin123`)
+
+| Page | Path | Function |
+|---|---|---|
+| Dashboard | `/` | Pending requests, active campaigns, unmask backlog, SoD rules, expiring roles |
+| Role Requests | `/requests` | Approve or reject user role requests; tabs by status |
+| Users | `/users` | View all Keycloak users, their governed roles, onboard / role-change / offboard |
+| Unmask Requests | `/unmask` | T2 approval gate — approve or reject field-level unmask requests |
+| Access Reviews | `/reviews` | Create recertification campaigns; certify keep/revoke per user per role |
+| Separation of Duties | `/sod` | Define mutually exclusive role pairs; approval auto-blocked if conflict detected |
+
+### Self-service portal (Keycloak OIDC login)
+
+Agents log in with their Keycloak credentials at `/portal`. They can:
+- See their current governed roles.
+- Submit a role request (new role, role change with optional expiry date and justification).
+- Track the status (pending / approved / rejected) of all past requests.
+
+### T1/T2 unmask security model
+
+| Layer | What it does |
+|---|---|
+| **T2 — Approval gate** | Agent submits request via frontend-hub → governance API (internal API key). Governance stores request as `pending`. Supervisor reviews in the governance console and approves → token UUID issued, `expires_at = NOW() + 15 min`. Self-approval is structurally impossible: agents use the OIDC frontend-hub path; only the static admin credential can approve in the governance console. |
+| **T1 — Token hygiene** | Kong calls `GET /unmask/validate/<uuid>?customer_id=…&username=…`. The governance service checks: `status='approved'`, `expires_at > NOW()`, `customer_id` match, `used_at IS NULL`, `username` match. On first valid use, a single atomic UPDATE sets `used_at=NOW()` and `status='consumed'` — preventing any replay even under concurrent requests. |
+
+### Governance DB tables
+
+| Table | Purpose |
+|---|---|
+| `governance_role_requests` | Role request lifecycle (pending → approved/rejected) |
+| `governance_access_campaigns` | Access review campaigns with due dates |
+| `governance_review_items` | Per-user per-role certify/revoke decisions |
+| `governance_sod_rules` | Mutually exclusive role pairs |
+| `unmask_sessions` | Unmask token lifecycle (pending → approved → consumed/rejected) |
+
+---
+
+## Frontend hub
+
+The Frontend Hub (`:3001`) is a multi-tenant OIDC portal. Each registered application has its
+own Keycloak OIDC client, so Kong sees a per-app `azp` (authorized party) claim that OPA uses
+for app-role enforcement.
+
+### Registered apps
+
+| App key | Keycloak client | Label | Intended roles |
+|---|---|---|---|
+| `agent` | `agent-portal` | Agent Portal | agent, care\_l1, care\_l2, billing\_agent, field\_technician, noc\_operator |
+| `supervisor` | `supervisor-dashboard` | Supervisor Dashboard | supervisor, care\_supervisor, vip\_agent, vip\_care |
+| `fraud` | `fraud-console` | Fraud Console | fraud\_analyst, compliance\_officer, data\_admin, admin |
+| `audit` | `audit-viewer-app` | Audit Viewer | audit\_viewer, compliance\_officer, admin |
+| `partner` | `partner-api` | Partner API | b2b\_partner, mvno\_partner, partner |
+
+### Hub landing page
+
+`http://localhost:3001` — shows all five app cards. Click an app to initiate the OIDC auth-code
+flow for that app's client. After login, the hub proxies customer lookups to Kong with the
+per-app JWT, forwarding `X-Unmask-Token` when present.
+
+### Unmask integration
+
+The frontend-hub includes:
+- A token field on the lookup form (pre-filled when a token is approved).
+- A request-unmask form that appears when the API response contains masked fields.
+- Auto-poll (`/agent/unmask/status/<uuid>`) every 15 seconds — fills the token field and prompts the user when approved.
+
+---
+
 ## Admin GUI
 
-Open **http://localhost:8888** and log in with `admin / admin123`.
+Open **http://localhost:8888** — log in with `admin / admin123`.
 
 | Page | Path | What you can do |
 |---|---|---|
-| Dashboard | `/` | Summary cards: VIP count, active mask rules, role count, backend count, last sync time |
-| VIP Customers | `/vip` | Add or remove VIP customer IDs — OPA picks up the change within 60 s |
+| Dashboard | `/` | Summary cards: tier counts, active mask rules, role count, backend count, last sync time |
+| Customer Tiers | `/tiers` | Assign customers to standard / premium / vip / risk |
 | Masking Rules | `/roles` | Checkbox matrix of role × field — save persists to PostgreSQL; OPA re-polls automatically |
 | Backends | `/backends` | Register backends, add/remove field alias mappings |
-| Sync OPA | POST `/sync` | Records a sync_log entry and returns a reminder that OPA will re-poll within 60 s (bundle mode — no direct push) |
-| Live config | GET `/api/config` | JSON view of the exact masking_config payload the bundle currently serves |
+| Applications | `/apps` | Register applications, set allowed roles per app — syncs to OPA bundle |
+| Users | `/users` | Onboard (create Keycloak user + assign role), change role, offboard (disable) |
+| Sync OPA | POST `/sync` | Records a sync\_log entry (OPA polls automatically within 60 s) |
+| Live config | GET `/api/config` | JSON view of the exact bundle payload OPA currently holds |
 
-**Changes persist to PostgreSQL immediately and are reflected in OPA within 15–60 seconds — no gateway or policy engine restart needed.**
+**Changes persist to PostgreSQL immediately and are reflected in OPA within 15–60 seconds.**
 
 ---
 
@@ -973,130 +960,104 @@ Open **http://localhost:8888** and log in with `admin / admin123`.
 .
 ├── docker-compose.yml          Service wiring, healthchecks, startup ordering
 │                               Services: postgres, keycloak, opa, admin-service,
-│                               kong, crm-mock, billing-mock, website,
-│                               log-dashboard, loki, grafana
+│                               governance-service, kong, crm-mock, billing-mock,
+│                               frontend-hub, website
 │
 ├── postgres/
-│   └── init.sql                Runs once on first volume creation: creates the
-│                               admindb database + adminuser (Keycloak uses the
-│                               default keycloak DB created by the image)
+│   └── init.sql                Creates admindb + adminuser on first boot
 │
 ├── keycloak/
-│   └── realm-config.json       Auto-imported realm: users (agent1, supervisor1,
-│                               vip1, admin1), roles, clients (website-client,
-│                               partner-client), service account for partner
+│   └── realm-config.json       Realm "demo" — 18 users, 20+ roles, 7 clients
+│                               (website-client, partner-client, agent-portal,
+│                               supervisor-dashboard, fraud-console,
+│                               audit-viewer-app, partner-api, governance-portal)
 │
 ├── opa/
-│   ├── policy.rego             Access + masking policy (v0 syntax)
-│   │                           References data.masking_config loaded via bundle
-│   └── opa-config.yaml         Bundle mode config: polls admin-service every
-│                               15–60 s; decision_logs.console=true (structured
-│                               JSON to stdout for Loki capture)
+│   ├── policy.rego             Rego v1 (import rego.v1) — decision, effective_allow,
+│   │                           tier_allowed, app_role_allowed, masked_fields,
+│   │                           backend_fields, context-signal rules
+│   └── opa-config.yaml         Bundle mode: polls admin-service every 15–60 s
 │
 ├── kong/
 │   └── kong.yml                DB-less declarative config
-│                               ├─ services: crm-service, billing-service
-│                               ├─ routes: customer, unmask, subscription, billing
-│                               └─ plugins (global):
-│                                   cors         — CORS headers
-│                                   pre-function — JWT RS256 verify (JWKS fetch +
-│                                                  per-worker 5-min cache + kid
-│                                                  rotation), MSISDN resolve,
-│                                                  OPA call, VIP/unmask enforce
-│                                   post-function — two-pass masking + audit log
+│                               pre-function: JWT RS256 verify, MSISDN resolve,
+│                                 OPA call, VIP enforce, unmask token validate
+│                               post-function: two-pass masking, async audit log
 │
 ├── admin-service/
-│   ├── app.py                  Flask + PostgreSQL CRUD (psycopg2-binary)
-│   │                           Tables: fields, vip_customers, role_masked_fields,
-│   │                                   backends, field_mappings, sync_log
-│   │                           GET /bundle/masking_config.tar.gz — gzip tarball
-│   │                           consumed by OPA bundle polling
-│   ├── requirements.txt        flask, requests, psycopg2-binary
+│   ├── app.py                  Flask + psycopg2: CRUD for tiers, roles, backends,
+│   │                           apps, app_roles, users (Keycloak Admin API),
+│   │                           sync_log; GET /bundle/masking_config.tar.gz
+│   ├── requirements.txt
 │   └── templates/
-│       ├── base.html           Bootstrap 5 nav shell
-│       ├── dashboard.html      5-card summary + masking matrix + sync log
-│       ├── vip.html            VIP customer management
-│       ├── roles.html          Role × field checkbox matrix
-│       └── backends.html       Backend registry + field alias accordion
+│       ├── base.html, dashboard.html, vip.html, roles.html
+│       ├── backends.html, apps.html, users.html, tiers.html
+│
+├── governance-service/
+│   ├── app.py                  Flask + psycopg2: role requests, access reviews,
+│   │                           SoD rules, unmask sessions (T1/T2 enforcement),
+│   │                           self-service portal (OIDC), governance admin login
+│   │                           Internal API: /api/unmask/request, /api/unmask/status
+│   │                           Token validate: GET /unmask/validate/<id>
+│   ├── requirements.txt
+│   └── templates/
+│       ├── base.html           MS Entra-style sidebar layout (Bootstrap Icons)
+│       ├── dashboard.html      5 metric cards + activity feed
+│       ├── requests.html       Role request approval table
+│       ├── users.html          User lifecycle management
+│       ├── unmask.html         T2 unmask approval + token status tabs
+│       ├── reviews.html        Access review campaigns
+│       ├── sod.html            SoD rule management
+│       ├── portal_login.html   Self-service portal login
+│       └── portal_dashboard.html  My access + request form + history
 │
 ├── crm-mock/
-│   └── app.py                  Flask mock, 4 customers (C001–C004)
-│                               Canonical field names: name, msisdn, email,
-│                               national_id, address, last_call_duration,
-│                               data_roaming_gb, last_location
-│                               Endpoints: /health, /api/customer/{id},
-│                               /api/customer?msisdn=, /api/resolve?msisdn=,
+│   └── app.py                  Flask mock — 4 customers, canonical field names
+│                               /health, /api/customer/{id}, /api/resolve?msisdn=,
 │                               POST /api/subscription
 │
 ├── billing-mock/
-│   └── app.py                  Flask mock, same 4 customers via MSISDN
-│                               Aliased field names: mobilenum, subname, ic_num,
-│                               billing_address, call_duration_s, roaming_gb
-│                               Non-PII: account_type, plan_code, outstanding_bill,
-│                               last_bill_date, data_usage_gb
-│                               Endpoints: /health, /api/billing/subscriber?msisdn=
+│   └── app.py                  Flask mock — 4 subscribers, aliased field names
+│                               /health, /api/billing/subscriber?msisdn=
 │
-├── website/
-│   ├── app.py                  Flask portal: OIDC auth code flow, customer by ID,
-│   │                           customer by MSISDN, billing subscriber by MSISDN,
-│   │                           reveal (unmask), add subscription
+├── frontend-hub/
+│   ├── app.py                  Flask + Authlib: 5 per-app OIDC clients, customer
+│   │                           lookup proxy, unmask request/status/poll proxy,
+│   │                           X-Unmask-Token forwarding
+│   ├── requirements.txt
 │   └── templates/
-│       ├── base.html           Bootstrap 5 shell + Bootstrap JS bundle
-│       ├── index.html          Landing / login page
-│       ├── search.html         Three-card search: customer ID, CRM MSISDN,
-│       │                       Billing MSISDN; quick-access test customer cards
-│       ├── customer.html       CRM customer detail: masked fields, VIP gate,
-│       │                       unmask panel, add-subscription panel
-│       └── subscriber.html     Billing subscriber detail: aliased fields with
-│                               canonical mapping + L1/L2 badges
+│       ├── portal.html         Hub landing — app cards
+│       └── app.html            Per-app view: lookup form, result, unmask flow
 │
-├── log-dashboard/
-│   ├── app.py                  Flask SSE receiver — receives audit events from
-│   │                           Kong and forwards each to Loki (fire-and-forget
-│   │                           daemon thread, 1 s timeout); in-memory ring
-│   │                           buffer (last 500 events) for /logs SSE stream
-│   └── requirements.txt        flask, requests
-│
-└── grafana/
-    └── provisioning/
-        ├── datasources/
-        │   └── loki.yaml       Auto-provisions Loki datasource at http://loki:3100
-        └── dashboards/
-            ├── dashboard.yaml  File provider config
-            └── data-masking.json  6-panel dashboard:
-                                   All Events · VIP Access Alerts · OPA Denials
-                                   Unmask Requests · Errors & Warnings
-                                   Billing Backend Requests
+└── website/
+    ├── app.py                  Legacy standalone OIDC portal (website-client)
+    └── templates/
+        ├── base.html, index.html, search.html
+        ├── customer.html, subscriber.html
 ```
 
 ---
 
 ## Startup order
 
-Docker Compose enforces this sequence:
-
 ```
 postgres (healthy — creates keycloak DB + admindb via init.sql)
-  ├─► keycloak (started — imports demo realm; retries until postgres is healthy)
-  │     └─► website (started — retries OIDC redirect until Keycloak realm is ready)
+  ├─► keycloak (started — imports demo realm)
+  │     ├─► website       (OIDC login depends on Keycloak)
+  │     ├─► frontend-hub  (5 per-app OIDC clients depend on Keycloak)
+  │     └─► governance-service (self-service portal OIDC + Keycloak Admin API)
   └─► admin-service (healthy — connects to admindb, seeds tables)
         └─► opa (started — immediately polls /bundle/masking_config.tar.gz)
-
-loki (healthy)
-  └─► log-dashboard (healthy — ready to receive audit events and forward to Loki)
-        ├─► crm-mock    (healthy)
-        ├─► billing-mock (healthy)
-        └─► kong (started — all dependencies healthy, first request is safe)
-
-grafana (started — auto-provisions Loki datasource + data-masking dashboard)
+              └─► kong (started — all dependencies healthy)
+                    (also depends on: crm-mock healthy, billing-mock healthy,
+                     governance-service healthy for unmask validation)
 ```
 
 Key guarantees:
-- Kong never starts until Admin Service is healthy, so OPA has received its first bundle before any request arrives.
-- OPA never starts until Admin Service is healthy, so the first bundle poll always succeeds.
-- Log Dashboard is healthy before Kong starts, so no audit events are lost.
-- Loki is healthy before Log Dashboard starts, so forwarded events land immediately.
-- Keycloak and Website use `restart: on-failure` to handle realm import timing.
+- Kong never starts until OPA and Governance are healthy — no request hits an unready gate.
+- OPA never starts until Admin Service is healthy — first bundle poll always succeeds.
+- Governance is up before Kong — unmask token validation is available immediately.
+- Keycloak realm is imported before frontend apps attempt OIDC discovery.
 
 ---
 
@@ -1106,51 +1067,56 @@ Key guarantees:
 
 **JWT RS256 signature verification** ✅  
 Kong fetches JWKS from Keycloak, caches per worker (5-min TTL), and verifies every token's
-RS256 signature before reading claims. Key rotation is handled automatically — on unknown `kid`,
-the cache is invalidated and keys are re-fetched once.
+RS256 signature before reading claims. Key rotation is handled automatically.
 
-**PostgreSQL persistence** ✅  
-Both Keycloak and the Admin Service use a shared PostgreSQL 16 instance with separate databases.
-Data survives container restarts via the `postgres-data` Docker volume.
+**T1/T2 unmask security** ✅  
+T2 approval gate ensures no agent can unmask data without supervisor sign-off. T1 token hygiene
+(15-min TTL, single-use, user + customer binding, atomic `consumed` update) prevents replay.
+
+**Customer tier ABAC** ✅  
+OPA cross-checks the customer's tier against the requesting role before returning `allow`. VIP
+and risk-tier customers are protected by policy — not just by role.
+
+**App-role gate** ✅  
+The `azp` claim (per-app Keycloak client) is used by OPA to enforce which roles may access which
+application. A user with a valid token cannot reach an app their role is not registered for.
 
 **OPA bundle mode** ✅  
-OPA polls the Admin Service for a gzip bundle every 15–60 seconds. Config is never lost on
-restart — no manual re-sync required. Decision logging (`decision_logs.console: true`) emits
-every evaluation as structured JSON to stdout, queryable via Loki.
+OPA polls the Admin Service for a gzip bundle every 15–60 seconds. Config changes survive
+restarts without manual re-sync.
 
-**Persistent audit log** ✅  
-Log Dashboard forwards every audit event to Loki (fire-and-forget). Grafana at `:3001`
-auto-provisions a dashboard with 6 panels: All Events, VIP Access Alerts, OPA Denials, Unmask
-Requests, Errors & Warnings, Billing Backend Requests.
+**PostgreSQL persistence** ✅  
+All state (Keycloak, Admin Service, Governance) uses a single PostgreSQL 16 instance with
+separate databases, persistent via the `postgres-data` Docker volume.
+
+**Non-blocking audit log** ✅  
+`log_event` in Governance runs in a daemon thread — synchronous timeouts cannot affect gateway
+response latency or corrupt token state.
 
 ---
 
 ### Remaining gaps for production
 
 **Secrets management**  
-Client secrets and admin passwords are hardcoded for demo convenience. In production, inject
-via a secrets manager (Vault, AWS Secrets Manager, etc.) and rotate regularly. The Keycloak
-admin password, partner client secret, and PostgreSQL credentials are the highest-priority items.
+Client secrets, admin passwords, and `GOVERNANCE_API_KEY` are hardcoded for demo convenience.
+In production, inject via Vault, AWS Secrets Manager, or equivalent and rotate regularly.
 
 **TLS everywhere**  
-All internal service-to-service calls (Kong→OPA, Kong→CRM, Admin→Postgres, Kong→Keycloak JWKS)
-and external endpoints use plain HTTP. In production, terminate TLS at Kong and use mutual TLS
-for internal east-west traffic.
+All internal calls use plain HTTP. In production, terminate TLS at Kong and use mutual TLS for
+internal east-west traffic.
 
 **Rate limiting and CSRF**  
-Kong has no rate-limit plugin configured. The Admin GUI has no CSRF protection. Add Kong's
-`rate-limiting` plugin and CSRF tokens to the admin service before exposing to a wider network.
+Kong has no rate-limit plugin configured. The Admin GUI and Governance Console have no CSRF
+protection. Add Kong's `rate-limiting` plugin and CSRF tokens before wider exposure.
 
 **Input validation**  
 Customer IDs and MSISDN values are passed to CRM/Billing as-is. Add allow-list validation in
 the Kong pre-function before constructing upstream URLs.
 
-**High availability**  
-The stack is single-instance. For production, run Kong in DB-backed cluster mode, replicate
-Postgres with streaming replication, and deploy OPA as a sidecar or replicated service behind
-a load balancer.
+**Governance API key rotation**  
+`GOVERNANCE_API_KEY` is a shared static secret between frontend-hub and governance-service.
+In production, replace with short-lived service tokens or mutual TLS.
 
-**Backend MSISDN resolution caching**  
-Kong calls CRM `/api/resolve?msisdn=` synchronously on every MSISDN-based request. For billing
-subscribers the lookup is best-effort (`customer_id=""` → treated as non-VIP). Cache this in
-Kong's shared dictionary (`kong.cache`) to reduce CRM latency impact.
+**High availability**  
+Single-instance stack. For production: Kong in DB-backed cluster mode, PostgreSQL with streaming
+replication, OPA as a sidecar or replicated service behind a load balancer.
