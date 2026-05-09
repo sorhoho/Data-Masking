@@ -179,6 +179,12 @@
       <span class="sidebar-badge">{{ pending_count }}</span>
       {% endif %}
     </a>
+    <a class="nav-link {% if '/packages' in request.path %}active{% endif %}" href="/packages">
+      <i class="bi bi-grid-fill"></i> Access Packages
+      {% if pkg_pending_count %}
+      <span class="sidebar-badge">{{ pkg_pending_count }}</span>
+      {% endif %}
+    </a>
     <a class="nav-link {% if '/users' in request.path %}active{% endif %}" href="/users">
       <i class="bi bi-people-fill"></i> Users
     </a>

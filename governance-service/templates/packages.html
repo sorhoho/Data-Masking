@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}Access Packages – Identity Governance{% endblock %}
+{% block content %}
+
+<div class="page-hdr d-flex justify-content-between align-items-start">
+  <div>
+    <h4>Access Packages</h4>
+    <p class="sub">Bundle roles into named packages — users request the package, not individual roles</p>
+  </div>
+  <button class="btn-ms" data-bs-toggle="modal" data-bs-target="#addPkgModal">
+    <i class="bi bi-plus-lg me-1"></i> Create package
+  </button>
+</div>
+
+<!-- View tabs -->
+<div class="d-flex gap-2 mb-3">
+  <a href="/packages?view=catalog"
+     class="btn-ms-outline {% if view == 'catalog' %}active{% endif %}"
+     style="{% if view == 'catalog' %}background:#deecf9;{% endif %}">
+    <i class="bi bi-grid-fill me-1"></i> Package Catalog
+    <span class="badge bg-dark ms-1">{{ pkgs | length }}</span>
+  </a>
+  <a href="/packages?view=requests"
+     class="btn-ms-outline {% if view == 'requests' %}active{% endif %}"
+     style="{% if view == 'requests' %}background:#deecf9;{% endif %}">
+    <i class="bi bi-inbox-fill me-1"></i> Requests
+    {% if pending_reqs %}<span class="badge ms-1" style="background:#c87f0a;color:#fff">{{ pending_reqs | length }}</span>{% endif %}
+  </a>
+</div>
+
+{% if view == 'catalog' %}
+<!-- ── Package Catalog ─────────────────────────────────────────────────────── -->
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
+      <tr>
+        <th>Package</th>
+        <th>Roles Included</th>
+        <th>Duration</th>
+        <th>Approval</th>
+        <th>Status</th>
+        <th style="width:110px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in pkgs %}
+      <tr {% if not p.enabled %}class="table-secondary text-muted"{% endif %}>
+        <td>
+          <div class="fw-semibold" style="font-size:.84rem">{{ p.name }}</div>
+          {% if p.description %}
+          <div class="text-muted" style="font-size:.75rem">{{ p.description }}</div>
+          {% endif %}
+        </td>
+        <td>
+          {% for r in p.roles %}
+          <span class="chip chip-role me-1 mb-1">{{ r }}</span>
+          {% endfor %}
+        </td>
+        <td class="small">
+          {% if p.max_duration_hours %}
+          <span class="chip" style="background:#fff4ce;color:#7a4f01;border:1px solid #f3d175">
+            <i class="bi bi-clock me-1"></i>{{ p.max_duration_hours }}h
+          </span>
+          {% else %}
+          <span class="text-muted">Permanent</span>
+          {% endif %}
+        </td>
+        <td class="small">
+          {% if p.requires_approval %}
+          <span class="chip chip-pending"><i class="bi bi-person-check me-1"></i>Required</span>
+          {% else %}
+          <span class="chip chip-approved"><i class="bi bi-lightning-fill me-1"></i>Auto</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.enabled %}
+          <span class="chip chip-approved">Enabled</span>
+          {% else %}
+          <span class="chip chip-consumed">Disabled</span>
+          {% endif %}
+        </td>
+        <td>
+          <div class="d-flex gap-1">
+            <form method="post" action="/packages/{{ p.id }}/toggle" class="d-inline">
+              <button class="btn-ms-outline py-1 px-2" style="font-size:.73rem" type="submit">
+                {{ 'Disable' if p.enabled else 'Enable' }}
+              </button>
+            </form>
+            <form method="post" action="/packages/{{ p.id }}/delete" class="d-inline"
+                  onsubmit="return confirm('Delete package {{ p.name }}?')">
+              <button class="btn-ms-danger py-1 px-2" style="font-size:.73rem" type="submit">
+                <i class="bi bi-trash3"></i>
+              </button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="6" class="text-center py-5 text-muted">
+          <i class="bi bi-grid d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No packages yet — create one above
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% else %}
+<!-- ── Package Requests ───────────────────────────────────────────────────── -->
+<div class="ms-card overflow-hidden">
+  <table class="ms-tbl">
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Package</th>
+        <th>Roles</th>
+        <th>Justification</th>
+        <th>Status</th>
+        <th>Requested</th>
+        <th>Expires</th>
+        <th style="width:140px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in reqs %}
+      <tr>
+        <td>
+          <div class="d-flex align-items-center gap-2">
+            <div class="avatar" style="background:{% if r.status == 'approved' %}#107c10{% elif r.status == 'rejected' %}#c50f1f{% else %}#0078d4{% endif %}">
+              {{ r.username[:2].upper() }}
+            </div>
+            <div>
+              <div class="fw-semibold" style="font-size:.83rem">{{ r.username }}</div>
+              <div class="text-muted" style="font-size:.72rem">{{ r.email or '' }}</div>
+            </div>
+          </div>
+        </td>
+        <td class="fw-semibold small">{{ r.package_name }}</td>
+        <td>
+          {% for role in (r.granted_roles or r.package_roles or []) %}
+          <span class="chip chip-role me-1" style="font-size:.68rem">{{ role }}</span>
+          {% endfor %}
+        </td>
+        <td class="small text-muted" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="{{ r.justification or '' }}">{{ r.justification or '—' }}</td>
+        <td>
+          <span class="chip chip-{{ r.status }}">
+            {% if r.status == 'approved'  %}<i class="bi bi-check-circle-fill"></i>
+            {% elif r.status == 'rejected' %}<i class="bi bi-x-circle-fill"></i>
+            {% elif r.status == 'pending'  %}<i class="bi bi-hourglass-split"></i>
+            {% elif r.status == 'expired'  %}<i class="bi bi-clock-history"></i>
+            {% endif %}
+            {{ r.status }}
+          </span>
+        </td>
+        <td class="small text-muted">{{ r.requested_at.strftime('%d %b %Y %H:%M') if r.requested_at else '—' }}</td>
+        <td class="small text-muted">{{ r.expires_at.strftime('%d %b %Y %H:%M') if r.expires_at else '—' }}</td>
+        <td>
+          {% if r.status == 'pending' %}
+          <div class="d-flex gap-1">
+            <form method="post" action="/packages/requests/{{ r.id }}/approve" class="d-inline">
+              <button class="btn-ms py-1 px-2" style="font-size:.73rem" type="submit">
+                <i class="bi bi-check-lg"></i> Approve
+              </button>
+            </form>
+            <form method="post" action="/packages/requests/{{ r.id }}/reject" class="d-inline">
+              <button class="btn-ms-danger py-1 px-2" style="font-size:.73rem" type="submit">
+                <i class="bi bi-x-lg"></i>
+              </button>
+            </form>
+          </div>
+          {% else %}
+          <span class="text-muted small">reviewed by {{ r.reviewed_by or '—' }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="8" class="text-center py-5 text-muted">
+          <i class="bi bi-inbox d-block mb-2" style="font-size:2rem;opacity:.25"></i>
+          No package requests yet
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- Create Package Modal -->
+<div class="modal fade" id="addPkgModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content" style="border-radius:4px;border:1px solid #edebe9">
+      <form method="post" action="/packages/add">
+        <div class="modal-header" style="border-bottom:1px solid #edebe9">
+          <h6 class="modal-title fw-semibold">
+            <i class="bi bi-grid-fill me-2" style="color:#0078d4"></i>Create Access Package
+          </h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label small fw-semibold">Package name <span class="text-danger">*</span></label>
+              <input class="form-control form-control-sm" name="name" required autofocus
+                     placeholder="e.g. Fraud Analyst On-Call">
+            </div>
+            <div class="col-12">
+              <label class="form-label small fw-semibold">Description</label>
+              <input class="form-control form-control-sm" name="description"
+                     placeholder="What this package grants and when to request it">
+            </div>
+            <div class="col-12">
+              <label class="form-label small fw-semibold">Roles included <span class="text-danger">*</span></label>
+              <div class="row g-2 mt-0">
+                {% for r in roles %}
+                <div class="col-6 col-md-4 col-lg-3">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="roles" value="{{ r }}" id="pkgr_{{ r }}">
+                    <label class="form-check-label small" for="pkgr_{{ r }}">{{ r }}</label>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small fw-semibold">Max duration (hours)</label>
+              <input type="number" class="form-control form-control-sm" name="max_duration_hours"
+                     placeholder="Leave blank = permanent" min="1">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small fw-semibold">Requires approval</label>
+              <select class="form-select form-select-sm" name="requires_approval">
+                <option value="true">Yes — admin must approve</option>
+                <option value="false">No — auto-grant on request</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer" style="border-top:1px solid #edebe9">
+          <button type="button" class="btn-ms-outline" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn-ms">Create package</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

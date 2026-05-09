@@ -155,6 +155,33 @@ def init_db():
         )""",
         # Migration: add used_at to existing tables
         "ALTER TABLE unmask_sessions ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ",
+        """CREATE TABLE IF NOT EXISTS access_packages (
+            id                 SERIAL PRIMARY KEY,
+            name               TEXT    NOT NULL,
+            description        TEXT    DEFAULT '',
+            roles              TEXT[]  NOT NULL DEFAULT '{}',
+            max_duration_hours INT,
+            requires_approval  BOOLEAN NOT NULL DEFAULT true,
+            enabled            BOOLEAN NOT NULL DEFAULT true,
+            created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_by         TEXT    NOT NULL DEFAULT 'system'
+        )""",
+        """CREATE TABLE IF NOT EXISTS access_package_requests (
+            id            SERIAL  PRIMARY KEY,
+            package_id    INT     NOT NULL REFERENCES access_packages(id),
+            package_name  TEXT    NOT NULL,
+            user_id       TEXT    NOT NULL,
+            username      TEXT    NOT NULL,
+            email         TEXT    DEFAULT '',
+            justification TEXT    DEFAULT '',
+            status        TEXT    NOT NULL DEFAULT 'pending',
+            requested_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reviewed_at   TIMESTAMPTZ,
+            reviewed_by   TEXT,
+            expires_at    TIMESTAMPTZ,
+            revoked_at    TIMESTAMPTZ,
+            granted_roles TEXT[]  NOT NULL DEFAULT '{}'
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -193,6 +220,40 @@ def init_db():
                 "INSERT INTO governance_sod_rules (role_a, role_b, reason) VALUES (%s,%s,%s) "
                 "ON CONFLICT DO NOTHING",
                 (role_a, role_b, reason))
+
+    _DEFAULT_PACKAGES = [
+        ("Front-line Care Agent",
+         "Standard care operations: L1 support with billing visibility",
+         ["care_l1", "billing_agent"], None, True),
+        ("Care Operations Lead",
+         "L2 care with supervisor access for escalation handling",
+         ["care_l2", "care_supervisor"], None, True),
+        ("Fraud Analyst On-Call",
+         "Time-limited fraud investigation and compliance access — 8-hour window",
+         ["fraud_analyst", "compliance_officer"], 8, True),
+        ("Technical Operations",
+         "NOC and field technician access for infrastructure teams",
+         ["noc_operator", "field_technician"], None, True),
+        ("Audit Compliance Review",
+         "Read-only audit and compliance access — 24-hour window",
+         ["audit_viewer", "compliance_officer"], 24, True),
+        ("VIP Care Specialist",
+         "Elevated VIP customer care with supervisor capabilities",
+         ["vip_care", "care_supervisor"], None, True),
+        ("External Partner Access",
+         "Standard-tier B2B partner data read access",
+         ["b2b_partner"], None, True),
+        ("Roaming Operations",
+         "Roaming and network operations team access",
+         ["roaming_ops", "noc_operator"], None, True),
+    ]
+    if not qone(conn, "SELECT 1 FROM access_packages LIMIT 1"):
+        for pkg_name, pkg_desc, pkg_roles, pkg_dur, pkg_appr in _DEFAULT_PACKAGES:
+            execute(conn,
+                """INSERT INTO access_packages
+                   (name, description, roles, max_duration_hours, requires_approval, enabled, created_by)
+                   VALUES (%s, %s, %s, %s, %s, true, 'system')""",
+                (pkg_name, pkg_desc, pkg_roles, pkg_dur, pkg_appr))
 
     conn.commit()
     conn.close()
@@ -357,10 +418,11 @@ def sidebar_counts():
         conn = get_db()
         pc  = scalar(conn, "SELECT COUNT(*) FROM governance_role_requests WHERE status='pending'")
         upc = scalar(conn, "SELECT COUNT(*) FROM unmask_sessions WHERE status='pending'")
+        pkgc = scalar(conn, "SELECT COUNT(*) FROM access_package_requests WHERE status='pending'")
         conn.close()
-        return {"pending_count": pc or 0, "unmask_pending_count": upc or 0}
+        return {"pending_count": pc or 0, "unmask_pending_count": upc or 0, "pkg_pending_count": pkgc or 0}
     except Exception:
-        return {"pending_count": 0, "unmask_pending_count": 0}
+        return {"pending_count": 0, "unmask_pending_count": 0, "pkg_pending_count": 0}
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -1160,9 +1222,172 @@ def _expiry_worker():
                 log_event("access_review_auto_applied",
                           {"campaign": campaign["name"], "revoked": revoked_count})
 
+            # ── 3. Package request expiry ────────────────────────────────
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT apr.*, ap.roles as package_roles
+                       FROM access_package_requests apr
+                       JOIN access_packages ap ON ap.id = apr.package_id
+                       WHERE apr.status='approved' AND apr.expires_at IS NOT NULL
+                         AND apr.expires_at <= NOW() AND apr.revoked_at IS NULL""")
+                expired_pkgs = cur.fetchall()
+
+            for req in expired_pkgs:
+                for role in (req["granted_roles"] or req["package_roles"] or []):
+                    try:
+                        _kc_revoke_role_raw(req["user_id"], role)
+                    except Exception:
+                        pass
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE access_package_requests SET revoked_at=NOW(), status='expired' WHERE id=%s",
+                        (req["id"],))
+                conn.commit()
+                log_event("package_expired",
+                          {"username": req["username"], "package": req["package_name"]})
+
             conn.close()
         except Exception:
             pass
+
+
+# ── Access Packages ───────────────────────────────────────────────────────────
+
+@app.get("/packages")
+@login_required
+def packages_list():
+    view   = request.args.get("view", "catalog")
+    conn   = get_db()
+    pkgs   = qrows(conn, "SELECT * FROM access_packages ORDER BY name")
+    reqs   = qrows(conn,
+        """SELECT apr.*, ap.roles as package_roles
+           FROM access_package_requests apr
+           JOIN access_packages ap ON ap.id = apr.package_id
+           ORDER BY apr.requested_at DESC""")
+    conn.close()
+    pending_reqs = [r for r in reqs if r["status"] == "pending"]
+    return render_template("packages.html",
+                           pkgs=pkgs, reqs=reqs, pending_reqs=pending_reqs,
+                           view=view, roles=GOVERNED_ROLES)
+
+
+@app.post("/packages/add")
+@login_required
+def packages_add():
+    name    = (request.form.get("name") or "").strip()
+    desc    = (request.form.get("description") or "").strip()
+    roles   = request.form.getlist("roles")
+    dur_str = (request.form.get("max_duration_hours") or "").strip()
+    max_dur = int(dur_str) if dur_str.isdigit() and int(dur_str) > 0 else None
+    req_appr = request.form.get("requires_approval") == "true"
+    if not name or not roles:
+        flash("Name and at least one role are required", "danger")
+        return redirect(url_for("packages_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            """INSERT INTO access_packages
+               (name, description, roles, max_duration_hours, requires_approval, enabled, created_by)
+               VALUES (%s, %s, %s, %s, %s, true, %s)""",
+            (name, desc, roles, max_dur, req_appr, ADMIN_USER))
+        conn.commit()
+        flash(f"Package '{name}' created", "success")
+    except Exception as exc:
+        conn.rollback()
+        flash(f"Error: {exc}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for("packages_list"))
+
+
+@app.post("/packages/<int:pkg_id>/toggle")
+@login_required
+def packages_toggle(pkg_id):
+    conn = get_db()
+    execute(conn, "UPDATE access_packages SET enabled = NOT enabled WHERE id = %s", (pkg_id,))
+    conn.commit()
+    conn.close()
+    flash("Package status toggled", "success")
+    return redirect(url_for("packages_list"))
+
+
+@app.post("/packages/<int:pkg_id>/delete")
+@login_required
+def packages_delete(pkg_id):
+    conn = get_db()
+    row = qone(conn, "SELECT name FROM access_packages WHERE id = %s", (pkg_id,))
+    execute(conn, "DELETE FROM access_packages WHERE id = %s", (pkg_id,))
+    conn.commit()
+    conn.close()
+    flash(f"Package '{row['name'] if row else pkg_id}' deleted", "success")
+    return redirect(url_for("packages_list"))
+
+
+@app.post("/packages/requests/<int:req_id>/approve")
+@login_required
+def package_request_approve(req_id):
+    conn = get_db()
+    req  = qone(conn,
+        """SELECT apr.*, ap.roles as package_roles, ap.max_duration_hours
+           FROM access_package_requests apr
+           JOIN access_packages ap ON ap.id = apr.package_id
+           WHERE apr.id = %s""", (req_id,))
+    conn.close()
+    if not req or req["status"] != "pending":
+        flash("Request not found or not pending", "danger")
+        return redirect(url_for("packages_list", view="requests"))
+
+    roles_to_grant = list(req["package_roles"] or [])
+
+    # SoD check for each role in the package
+    for role in roles_to_grant:
+        ok, reason = sod_check(req["user_id"], role)
+        if not ok:
+            flash(f"Blocked — SoD violation: {reason}", "danger")
+            return redirect(url_for("packages_list", view="requests"))
+
+    try:
+        for role in roles_to_grant:
+            kc_assign_role(req["user_id"], role)
+
+        max_dur = req["max_duration_hours"]
+        expires_at_sql = (
+            f"NOW() + INTERVAL '{max_dur} hours'" if max_dur else "NULL"
+        )
+        conn = get_db()
+        execute(conn,
+            f"""UPDATE access_package_requests
+                SET status='approved', reviewed_at=NOW(), reviewed_by=%s,
+                    expires_at={expires_at_sql}, granted_roles=%s
+                WHERE id=%s""",
+            (ADMIN_USER, roles_to_grant, req_id))
+        conn.commit()
+        conn.close()
+        log_event("package_approved",
+                  {"username": req["username"], "package": req["package_name"],
+                   "roles": roles_to_grant})
+        duration_msg = (f" — access expires in {req['max_duration_hours']}h"
+                        if req["max_duration_hours"] else " — permanent access")
+        flash(f"Package '{req['package_name']}' approved for {req['username']}{duration_msg}", "success")
+    except Exception as exc:
+        flash(f"Keycloak error: {exc}", "danger")
+    return redirect(url_for("packages_list", view="requests"))
+
+
+@app.post("/packages/requests/<int:req_id>/reject")
+@login_required
+def package_request_reject(req_id):
+    conn = get_db()
+    row  = qone(conn, "SELECT username, package_name FROM access_package_requests WHERE id=%s", (req_id,))
+    execute(conn,
+        "UPDATE access_package_requests SET status='rejected', reviewed_at=NOW(), reviewed_by=%s WHERE id=%s",
+        (ADMIN_USER, req_id))
+    conn.commit()
+    conn.close()
+    if row:
+        log_event("package_rejected", {"username": row["username"], "package": row["package_name"]})
+    flash("Package request rejected", "warning")
+    return redirect(url_for("packages_list", view="requests"))
 
 
 # ── Self-service portal ───────────────────────────────────────────────────────
@@ -1233,10 +1458,15 @@ def portal_dashboard():
     my_requests = qrows(conn,
         "SELECT * FROM governance_role_requests WHERE user_id=%s ORDER BY requested_at DESC LIMIT 10",
         (user_id,))
+    packages = qrows(conn, "SELECT * FROM access_packages WHERE enabled=true ORDER BY name")
+    my_pkg_requests = qrows(conn,
+        "SELECT * FROM access_package_requests WHERE user_id=%s ORDER BY requested_at DESC LIMIT 10",
+        (user_id,))
     conn.close()
     return render_template("portal_dashboard.html",
                            username=username, my_roles=my_roles,
-                           my_requests=my_requests, roles=GOVERNED_ROLES)
+                           my_requests=my_requests, roles=GOVERNED_ROLES,
+                           packages=packages, my_pkg_requests=my_pkg_requests)
 
 
 @app.post("/portal/request")
@@ -1261,6 +1491,48 @@ def portal_request():
     conn.close()
     log_event("portal_role_request", {"username": username, "requested_role": requested_role})
     flash("Request submitted — an admin will review it shortly", "success")
+    return redirect(url_for("portal_dashboard"))
+
+
+@app.post("/portal/package-request")
+@portal_login_required
+def portal_package_request():
+    user_id       = session["portal_user_id"]
+    username      = session["portal_username"]
+    email         = session.get("portal_email", "")
+    package_id    = request.form.get("package_id", "")
+    justification = (request.form.get("justification") or "").strip()
+
+    if not package_id:
+        flash("Package is required", "danger")
+        return redirect(url_for("portal_dashboard"))
+
+    conn = get_db()
+    pkg = qone(conn, "SELECT * FROM access_packages WHERE id=%s AND enabled=true", (package_id,))
+    if not pkg:
+        conn.close()
+        flash("Package not found or disabled", "danger")
+        return redirect(url_for("portal_dashboard"))
+
+    # Check no pending/approved request already exists for this package
+    existing = qone(conn,
+        "SELECT id FROM access_package_requests WHERE user_id=%s AND package_id=%s AND status IN ('pending','approved')",
+        (user_id, package_id))
+    if existing:
+        conn.close()
+        flash(f"You already have a pending or active '{pkg['name']}' request", "warning")
+        return redirect(url_for("portal_dashboard"))
+
+    execute(conn,
+        """INSERT INTO access_package_requests
+           (package_id, package_name, user_id, username, email, justification)
+           VALUES (%s, %s, %s, %s, %s, %s)""",
+        (package_id, pkg["name"], user_id, username, email, justification))
+    conn.commit()
+    conn.close()
+    log_event("portal_package_request",
+              {"username": username, "package": pkg["name"]})
+    flash(f"Access package '{pkg['name']}' requested — pending admin approval", "success")
     return redirect(url_for("portal_dashboard"))
 
 

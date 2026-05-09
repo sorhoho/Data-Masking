@@ -20,15 +20,25 @@
     .chip-approved { background: #dff6dd; color: #1a5e20; border: 1px solid #57c068; }
     .chip-rejected { background: #fde7e9; color: #8b1a1a; border: 1px solid #f87171; }
     .chip-pending  { background: #fff4ce; color: #7a4f01; border: 1px solid #f3d175; }
+    .chip-expired  { background: #f3f2f1; color: #605e5c; border: 1px solid #c8c6c4; }
     .chip-role     { background: #deecf9; color: #004578; border: 1px solid #a9cfe3; }
     .btn-ms { background: #0078d4; color: #fff; border: none; padding: .4rem 1rem;
       border-radius: 2px; font-size: .84rem; cursor: pointer; }
     .btn-ms:hover { background: #106ebe; color: #fff; }
+    .btn-ms-outline { background: transparent; color: #0078d4; border: 1px solid #0078d4;
+      padding: .35rem .9rem; border-radius: 2px; font-size: .82rem; cursor: pointer; }
+    .btn-ms-outline:hover { background: #deecf9; }
     .ms-tbl { width: 100%; border-collapse: collapse; }
     .ms-tbl thead th { background: #faf9f8; padding: .5rem .9rem; font-size: .72rem; font-weight: 700;
       color: #605e5c; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid #edebe9; }
     .ms-tbl tbody td { padding: .6rem .9rem; border-bottom: 1px solid #f3f2f1; vertical-align: middle; }
     .ms-tbl tbody tr:last-child td { border-bottom: none; }
+    .pkg-card {
+      border: 1px solid #edebe9; border-radius: 4px; padding: 1rem;
+      background: #fff; transition: border-color .15s, box-shadow .15s;
+    }
+    .pkg-card:hover { border-color: #0078d4; box-shadow: 0 2px 8px rgba(0,120,212,.12); }
+    .pkg-card.has-active { border-color: #57c068; background: #f8fff8; }
   </style>
 </head>
 <body>
@@ -42,7 +52,7 @@
      style="font-size:.78rem;border:1px solid rgba(255,255,255,.4);padding:.2rem .6rem;border-radius:2px">Sign out</a>
 </div>
 
-<div class="container py-4" style="max-width:900px">
+<div class="container py-4" style="max-width:960px">
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
@@ -69,17 +79,95 @@
     </div>
     <div class="d-flex flex-wrap gap-2">
       {% for role in my_roles %}
-      <span class="chip chip-role"><i class="bi bi-person-badge-fill"></i>{{ role }}</span>
+      <span class="chip chip-role"><i class="bi bi-person-badge-fill"></i> {{ role }}</span>
       {% else %}
-      <span class="text-muted small">No governed roles — submit a request below to get started.</span>
+      <span class="text-muted small">No governed roles — request an access package below to get started.</span>
       {% endfor %}
     </div>
   </div>
 
-  <!-- Request access -->
+  <!-- Access Packages -->
+  <div class="fw-semibold mb-2" style="font-size:.95rem">
+    <i class="bi bi-grid-fill me-2" style="color:#0078d4"></i>Available access packages
+  </div>
+  <p class="text-muted small mb-3">
+    Packages bundle related roles into a single request. An admin will approve before access is granted.
+  </p>
+
+  {% set active_pkg_ids = my_pkg_requests | selectattr('status','equalto','approved') | map(attribute='package_id') | list %}
+  {% set pending_pkg_ids = my_pkg_requests | selectattr('status','equalto','pending') | map(attribute='package_id') | list %}
+
+  {% if packages %}
+  <div class="row g-3 mb-4">
+    {% for p in packages %}
+    {% set is_active  = p.id in active_pkg_ids %}
+    {% set is_pending = p.id in pending_pkg_ids %}
+    <div class="col-md-6">
+      <div class="pkg-card {% if is_active %}has-active{% endif %}">
+        <div class="d-flex justify-content-between align-items-start mb-2">
+          <div class="fw-semibold" style="font-size:.88rem">{{ p.name }}</div>
+          {% if is_active %}
+          <span class="chip chip-approved" style="font-size:.65rem"><i class="bi bi-check-circle-fill"></i> Active</span>
+          {% elif is_pending %}
+          <span class="chip chip-pending" style="font-size:.65rem"><i class="bi bi-hourglass-split"></i> Pending</span>
+          {% endif %}
+        </div>
+        {% if p.description %}
+        <div class="text-muted mb-2" style="font-size:.78rem">{{ p.description }}</div>
+        {% endif %}
+        <div class="d-flex flex-wrap gap-1 mb-3">
+          {% for r in p.roles %}
+          <span class="chip chip-role" style="font-size:.68rem">{{ r }}</span>
+          {% endfor %}
+        </div>
+        <div class="d-flex align-items-center gap-2 mb-3">
+          {% if p.max_duration_hours %}
+          <span class="chip" style="background:#fff4ce;color:#7a4f01;border:1px solid #f3d175;font-size:.68rem">
+            <i class="bi bi-clock"></i> {{ p.max_duration_hours }}h access
+          </span>
+          {% else %}
+          <span class="chip" style="background:#f3f2f1;color:#605e5c;border:1px solid #c8c6c4;font-size:.68rem">
+            <i class="bi bi-infinity"></i> Permanent
+          </span>
+          {% endif %}
+          {% if p.requires_approval %}
+          <span class="chip" style="background:#f3f2f1;color:#605e5c;border:1px solid #c8c6c4;font-size:.68rem">
+            <i class="bi bi-person-check"></i> Requires approval
+          </span>
+          {% endif %}
+        </div>
+        {% if is_active %}
+        <div class="text-muted small"><i class="bi bi-check-circle text-success me-1"></i>You have this access</div>
+        {% elif is_pending %}
+        <div class="text-muted small"><i class="bi bi-hourglass text-warning me-1"></i>Request pending admin review</div>
+        {% else %}
+        <form method="post" action="/portal/package-request">
+          <input type="hidden" name="package_id" value="{{ p.id }}">
+          <div class="input-group input-group-sm">
+            <input class="form-control form-control-sm" name="justification"
+                   placeholder="Justification / ticket # (optional)">
+            <button class="btn-ms" type="submit" style="white-space:nowrap">
+              <i class="bi bi-send-fill me-1"></i>Request
+            </button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="ms-card p-4 mb-4 text-center text-muted">
+    <i class="bi bi-grid d-block mb-1" style="font-size:1.5rem;opacity:.25"></i>
+    <div class="small">No packages available — contact your administrator</div>
+  </div>
+  {% endif %}
+
+  <!-- Request individual role -->
   <div class="ms-card p-4 mb-3">
     <div class="fw-semibold mb-3" style="font-size:.95rem">
-      <i class="bi bi-plus-circle-fill me-2" style="color:#0078d4"></i>Request access
+      <i class="bi bi-person-badge-fill me-2" style="color:#605e5c"></i>Request individual role
+      <span class="text-muted fw-normal small ms-1">— use packages above for standard access</span>
     </div>
     <form method="post" action="/portal/request" class="row g-3">
       <div class="col-sm-3">
@@ -112,8 +200,39 @@
     </form>
   </div>
 
-  <!-- Request history -->
-  <div class="fw-semibold mb-2" style="font-size:.9rem">My requests</div>
+  <!-- Package request history -->
+  {% if my_pkg_requests %}
+  <div class="fw-semibold mb-2" style="font-size:.9rem">My package requests</div>
+  <div class="ms-card overflow-hidden mb-3">
+    <table class="ms-tbl">
+      <thead>
+        <tr><th>Package</th><th>Status</th><th>Expires</th><th>Submitted</th></tr>
+      </thead>
+      <tbody>
+        {% for r in my_pkg_requests %}
+        <tr>
+          <td class="fw-semibold small">{{ r.package_name }}</td>
+          <td>
+            <span class="chip chip-{{ r.status }}">
+              {% if r.status == 'approved'  %}<i class="bi bi-check-circle-fill"></i>
+              {% elif r.status == 'rejected' %}<i class="bi bi-x-circle-fill"></i>
+              {% elif r.status == 'pending'  %}<i class="bi bi-hourglass-split"></i>
+              {% elif r.status == 'expired'  %}<i class="bi bi-clock-history"></i>
+              {% endif %}
+              {{ r.status }}
+            </span>
+          </td>
+          <td class="small text-muted">{{ r.expires_at.strftime('%d %b %Y %H:%M') if r.expires_at else '—' }}</td>
+          <td class="small text-muted">{{ r.requested_at.strftime('%d %b %Y %H:%M') if r.requested_at else '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- Role request history -->
+  <div class="fw-semibold mb-2" style="font-size:.9rem">My role requests</div>
   <div class="ms-card overflow-hidden">
     <table class="ms-tbl">
       <thead>
