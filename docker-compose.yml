@@ -76,7 +76,7 @@ services:
     ports:
       - "8090:8080"
     environment:
-      MP_SET_midpoint_administrator_initialPassword: "admin123"
+      MP_SET_midpoint_administrator_initialPassword: "Admin123!"
     volumes:
       - midpoint-home:/opt/midpoint/var
       - ./midpoint/config/config.xml:/opt/midpoint/var/config/config.xml
