@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Data-masking roles — mirrors Keycloak realm roles.
+    Imported into midPoint so IGA can assign/revoke them via provisioning to Keycloak.
+-->
+<objects xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3">
+
+    <!-- ── Privileged ──────────────────────────────────────────────────────── -->
+    <role oid="d0000000-0000-0000-0001-000000000001">
+        <name>admin</name>
+        <description>Full administrative access — no field masking</description>
+    </role>
+    <role oid="d0000000-0000-0000-0001-000000000002">
+        <name>vip_agent</name>
+        <description>VIP customer handling — no field masking</description>
+    </role>
+    <role oid="d0000000-0000-0000-0001-000000000003">
+        <name>fraud_analyst</name>
+        <description>Fraud investigation — full PII access</description>
+    </role>
+    <role oid="d0000000-0000-0000-0001-000000000004">
+        <name>compliance_officer</name>
+        <description>Regulatory compliance — full PII access</description>
+    </role>
+    <role oid="d0000000-0000-0000-0001-000000000005">
+        <name>vip_care</name>
+        <description>VIP care specialist — no field masking</description>
+    </role>
+    <role oid="d0000000-0000-0000-0001-000000000006">
+        <name>data_admin</name>
+        <description>Data administration — full access</description>
+    </role>
+
+    <!-- ── Care Operations ─────────────────────────────────────────────────── -->
+    <role oid="d0000000-0000-0000-0002-000000000001">
+        <name>care_l1</name>
+        <description>Frontline care — name visible, contact + PII masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0002-000000000002">
+        <name>care_l2</name>
+        <description>Escalation care — contact visible, PII + L2 masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0002-000000000003">
+        <name>care_supervisor</name>
+        <description>Care team lead — national_id + location masked</description>
+    </role>
+
+    <!-- ── Technical Operations ───────────────────────────────────────────── -->
+    <role oid="d0000000-0000-0000-0003-000000000001">
+        <name>noc_operator</name>
+        <description>Network ops — network data visible, identity masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0003-000000000002">
+        <name>field_technician</name>
+        <description>Field ops — name/MSISDN/address/location visible</description>
+    </role>
+    <role oid="d0000000-0000-0000-0003-000000000003">
+        <name>roaming_ops</name>
+        <description>Roaming ops — MSISDN + roaming data visible</description>
+    </role>
+
+    <!-- ── Business Operations ────────────────────────────────────────────── -->
+    <role oid="d0000000-0000-0000-0004-000000000001">
+        <name>agent</name>
+        <description>Standard agent — most fields masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0004-000000000002">
+        <name>supervisor</name>
+        <description>Team supervisor — MSISDN + national_id masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0004-000000000003">
+        <name>billing_agent</name>
+        <description>Billing ops — charges + name/MSISDN visible</description>
+    </role>
+    <role oid="d0000000-0000-0000-0004-000000000004">
+        <name>audit_viewer</name>
+        <description>Read-only compliance audit — all fields masked</description>
+    </role>
+
+    <!-- ── External Partners ──────────────────────────────────────────────── -->
+    <role oid="d0000000-0000-0000-0005-000000000001">
+        <name>partner</name>
+        <description>Generic partner — most PII masked, standard tier only</description>
+    </role>
+    <role oid="d0000000-0000-0000-0005-000000000002">
+        <name>b2b_partner</name>
+        <description>B2B partner — name visible, all else masked</description>
+    </role>
+    <role oid="d0000000-0000-0000-0005-000000000003">
+        <name>mvno_partner</name>
+        <description>MVNO partner — MSISDN + roaming visible</description>
+    </role>
+
+</objects>
