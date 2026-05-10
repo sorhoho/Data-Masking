@@ -884,6 +884,92 @@ def simulate():
                            error=error, form=form)
 
 
+# ── Application registry ─────────────────────────────────────────────────────
+
+@app.get("/apps")
+@login_required
+def apps_list():
+    conn     = get_db()
+    apps     = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
+    rows     = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+    conn.close()
+    app_role_map = {}
+    for r in rows:
+        app_role_map.setdefault(r["app_id"], []).append(r["role"])
+    return render_template("apps.html", apps=apps, app_role_map=app_role_map,
+                           roles=ROLES, mp_source=False)
+
+
+@app.post("/apps/add")
+@login_required
+def apps_add():
+    app_id = (request.form.get("app_id")       or "").strip().lower()
+    name   = (request.form.get("name")         or "").strip()
+    url    = (request.form.get("upstream_url") or "").strip()
+    desc   = (request.form.get("description")  or "").strip()
+    if not app_id or not name:
+        flash("App ID and name are required", "danger")
+        return redirect(url_for("apps_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, 'admin', %s)",
+            (app_id, name, url, desc, datetime.utcnow().isoformat()))
+        conn.commit()
+        flash(f"App '{app_id}' registered. Configure its allowed roles below.", "success")
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        flash(f"App ID '{app_id}' already exists", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/remove/<app_id>")
+@login_required
+def apps_remove(app_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM apps WHERE app_id = %s", (app_id,))
+    conn.commit()
+    conn.close()
+    flash(f"App '{app_id}' removed from registry.", "success")
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/<app_id>/roles/save")
+@login_required
+def apps_roles_save(app_id):
+    """DB-only fallback — only effective when midPoint is unreachable."""
+    selected = [r for r in ROLES if request.form.get(f"role__{r}")]
+    conn     = get_db()
+    execute(conn, "DELETE FROM app_roles WHERE app_id = %s", (app_id,))
+    if selected:
+        executemany(conn, "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
+                    [(app_id, r) for r in selected])
+    conn.commit()
+    conn.close()
+    sync_to_opa()
+    flash(f"Roles saved for '{app_id}' — OPA will reload within 60s", "success")
+    return redirect(url_for("apps_list"))
+
+
+GOVERNANCE_API_KEY = os.environ.get("GOVERNANCE_API_KEY", "governance-internal-key")
+
+
+@app.get("/api/apps")
+def api_apps_list():
+    """JSON list of registered apps — consumed by frontend-hub for dynamic discovery."""
+    key = request.headers.get("X-Governance-API-Key") or request.headers.get("X-Api-Key", "")
+    if key != GOVERNANCE_API_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    conn = get_db()
+    rows = qrows(conn,
+        "SELECT app_id, name, upstream_url, description FROM apps ORDER BY app_id")
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
 # ── Dynamic rule engine ──────────────────────────────────────────────────────
 
 @app.get("/rules")

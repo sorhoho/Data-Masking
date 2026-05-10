@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from functools import wraps
 from flask import Flask, session, redirect, url_for, render_template, request, jsonify
@@ -22,6 +23,8 @@ OPA_URL                 = os.environ.get("OPA_URL",                 "http://opa:
 GOVERNANCE_INTERNAL_URL = os.environ.get("GOVERNANCE_INTERNAL_URL", "http://governance-service:8889")
 GOVERNANCE_API_KEY      = os.environ.get("GOVERNANCE_API_KEY",      "governance-internal-key")
 REALM = "demo"
+
+APPS_CACHE_TTL = 300  # seconds
 
 UNMASK_REASON_CODES = [
     "FRAUD_INVESTIGATION", "COMPLIANCE_AUDIT", "LEGAL_HOLD",
@@ -54,8 +57,9 @@ def pick_role(roles):
     return best
 
 # ── App registry ──────────────────────────────────────────────────────────────
-# client_id must match Keycloak client AND the App ID registered in admin-service
-APPS = {
+# Static baseline — always available even when admin-service is unreachable.
+# client_id must match Keycloak client AND App ID registered in admin-service.
+_APPS_STATIC = {
     "agent": {
         "client_id":   "agent-portal",
         "secret":      "agent-portal-secret",
@@ -98,25 +102,80 @@ APPS = {
     },
 }
 
-# ── Register one OAuth client per app ─────────────────────────────────────────
+# Display metadata keyed by client_id — for known apps that might appear dynamically
+_KNOWN_META: dict = {
+    cfg["client_id"]: {"color": cfg["color"], "icon": cfg["icon"]}
+    for cfg in _APPS_STATIC.values()
+}
+_STATIC_CLIENT_IDS: set = {cfg["client_id"] for cfg in _APPS_STATIC.values()}
+
+_apps_cache: dict = {"data": None, "fetched_at": 0.0}
+
+
+def get_apps() -> dict:
+    """Return merged app dict: static apps + dynamic apps from admin-service registry."""
+    now = time.time()
+    if _apps_cache["data"] is not None and now - _apps_cache["fetched_at"] < APPS_CACHE_TTL:
+        return _apps_cache["data"]
+
+    dynamic: dict = {}
+    try:
+        resp = requests.get(
+            f"{GOVERNANCE_INTERNAL_URL}/api/apps",
+            headers={"X-Governance-API-Key": GOVERNANCE_API_KEY},
+            timeout=5,
+        )
+        if resp.ok:
+            for a in resp.json():
+                app_id = (a.get("app_id") or "").strip()
+                if not app_id or app_id in _STATIC_CLIENT_IDS:
+                    continue  # already covered by a static entry
+                meta = _KNOWN_META.get(app_id, {})
+                dynamic[app_id] = {
+                    "client_id":   app_id,
+                    "secret":      f"{app_id}-secret",
+                    "label":       (a.get("name") or meta.get("label") or app_id),
+                    "description": a.get("description", ""),
+                    "color":       meta.get("color", "dark"),
+                    "icon":        meta.get("icon", "&#128196;"),
+                }
+    except Exception:
+        pass  # admin-service unreachable — return static + stale dynamic cache
+
+    merged = {**_APPS_STATIC, **dynamic}
+    _apps_cache["data"]       = merged
+    _apps_cache["fetched_at"] = now
+    return merged
+
+
+# ── OAuth (lazy registration per app) ────────────────────────────────────────
 oauth = OAuth(app)
-for _key, _cfg in APPS.items():
-    oauth.register(
-        name=f"kc_{_key}",
-        client_id=_cfg["client_id"],
-        client_secret=_cfg["secret"],
-        authorize_url=f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/auth",
-        access_token_url=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/token",
-        userinfo_endpoint=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/userinfo",
-        jwks_uri=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/certs",
-        client_kwargs={
-            "scope": "openid profile email roles",
-            "token_endpoint_auth_method": "client_secret_post",
-        },
-    )
+_registered_oauth_keys: set = set()
 
 
-def _oa(app_key):
+def _oa(app_key: str):
+    """Return authlib client for app_key; registers the OAuth client lazily."""
+    if app_key not in _registered_oauth_keys:
+        cfg = get_apps().get(app_key)
+        if not cfg:
+            return None
+        try:
+            oauth.register(
+                name=f"kc_{app_key}",
+                client_id=cfg["client_id"],
+                client_secret=cfg["secret"],
+                authorize_url=f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/auth",
+                access_token_url=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/token",
+                userinfo_endpoint=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/userinfo",
+                jwks_uri=f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/certs",
+                client_kwargs={
+                    "scope": "openid profile email roles",
+                    "token_endpoint_auth_method": "client_secret_post",
+                },
+            )
+        except Exception:
+            pass  # already registered
+        _registered_oauth_keys.add(app_key)
     return oauth.create_client(f"kc_{app_key}")
 
 
@@ -143,15 +202,16 @@ def login_required_for(app_key):
 
 @app.get("/")
 def portal():
-    logged_in = {k: bool(app_token(k)) for k in APPS}
-    return render_template("portal.html", apps=APPS, logged_in=logged_in)
+    apps = get_apps()
+    logged_in = {k: bool(app_token(k)) for k in apps}
+    return render_template("portal.html", apps=apps, logged_in=logged_in)
 
 
 # ── Per-app auth ──────────────────────────────────────────────────────────────
 
 @app.get("/<app_key>/login")
 def app_login(app_key):
-    if app_key not in APPS:
+    if app_key not in get_apps():
         return "Unknown app", 404
     redirect_uri = url_for("app_callback", app_key=app_key, _external=True)
     return _oa(app_key).authorize_redirect(redirect_uri)
@@ -159,7 +219,8 @@ def app_login(app_key):
 
 @app.get("/<app_key>/callback")
 def app_callback(app_key):
-    if app_key not in APPS:
+    apps = get_apps()
+    if app_key not in apps:
         return "Unknown app", 404
     token        = _oa(app_key).authorize_access_token()
     access_token = token["access_token"]
@@ -172,9 +233,8 @@ def app_callback(app_key):
     user_role = pick_role(userinfo.get("roles", []))
 
     # ── App-role gate: check OPA bundle before granting session ──────────────
-    app_id          = APPS[app_key]["client_id"]
-    allowed_roles   = None   # None = app not in registry → open
-    opa_check_error = None
+    app_id        = apps[app_key]["client_id"]
+    allowed_roles = None
     try:
         opa_resp = requests.get(
             f"{OPA_URL}/v1/data/masking_config/app_roles",
@@ -184,13 +244,13 @@ def app_callback(app_key):
             app_roles_map = opa_resp.json().get("result", {})
             if app_id in app_roles_map:
                 allowed_roles = app_roles_map[app_id]
-    except Exception as exc:
-        opa_check_error = str(exc)   # OPA down → fail open, log only
+    except Exception:
+        pass  # OPA down → fail open, log only
 
     if allowed_roles is not None and user_role not in allowed_roles:
         return render_template("denied.html",
                                app_key=app_key,
-                               app_cfg=APPS[app_key],
+                               app_cfg=apps[app_key],
                                username=userinfo.get("preferred_username", "unknown"),
                                user_role=user_role,
                                allowed_roles=sorted(allowed_roles))
@@ -218,13 +278,14 @@ def app_logout(app_key):
 
 @app.get("/<app_key>/")
 def app_home(app_key):
-    if app_key not in APPS:
+    apps = get_apps()
+    if app_key not in apps:
         return "Unknown app", 404
     if not app_token(app_key):
         return redirect(url_for("app_login", app_key=app_key))
     return render_template("app.html",
                            app_key=app_key,
-                           app_cfg=APPS[app_key],
+                           app_cfg=apps[app_key],
                            user=app_user(app_key),
                            result=None, error=None,
                            reason_codes=UNMASK_REASON_CODES,
@@ -233,7 +294,8 @@ def app_home(app_key):
 
 @app.get("/<app_key>/lookup")
 def app_lookup(app_key):
-    if app_key not in APPS:
+    apps = get_apps()
+    if app_key not in apps:
         return "Unknown app", 404
     if not app_token(app_key):
         return redirect(url_for("app_login", app_key=app_key))
@@ -246,7 +308,7 @@ def app_lookup(app_key):
 
     if not cid and not msisdn:
         return render_template("app.html",
-                               app_key=app_key, app_cfg=APPS[app_key],
+                               app_key=app_key, app_cfg=apps[app_key],
                                user=app_user(app_key),
                                result=None, error="Customer ID or MSISDN required",
                                reason_codes=UNMASK_REASON_CODES,
@@ -276,7 +338,7 @@ def app_lookup(app_key):
         if resp.status_code == 200:
             error = None
         return render_template("app.html",
-                               app_key=app_key, app_cfg=APPS[app_key],
+                               app_key=app_key, app_cfg=apps[app_key],
                                user=app_user(app_key),
                                result=result if resp.status_code == 200 else None,
                                error=error,
@@ -289,14 +351,14 @@ def app_lookup(app_key):
 
     except requests.exceptions.ConnectionError:
         return render_template("app.html",
-                               app_key=app_key, app_cfg=APPS[app_key],
+                               app_key=app_key, app_cfg=apps[app_key],
                                user=app_user(app_key),
                                result=None, error="Cannot reach Kong API Gateway",
                                reason_codes=UNMASK_REASON_CODES,
                                unmask_fields=UNMASK_FIELDS)
     except requests.exceptions.Timeout:
         return render_template("app.html",
-                               app_key=app_key, app_cfg=APPS[app_key],
+                               app_key=app_key, app_cfg=apps[app_key],
                                user=app_user(app_key),
                                result=None, error="Request timed out",
                                reason_codes=UNMASK_REASON_CODES,
@@ -307,7 +369,8 @@ def app_lookup(app_key):
 
 @app.post("/<app_key>/unmask/request")
 def app_unmask_request(app_key):
-    if app_key not in APPS:
+    apps = get_apps()
+    if app_key not in apps:
         return "Unknown app", 404
     if not app_token(app_key):
         return redirect(url_for("app_login", app_key=app_key))
@@ -343,7 +406,7 @@ def app_unmask_request(app_key):
         error = f"Cannot reach governance service: {exc}"
 
     return render_template("app.html",
-                           app_key=app_key, app_cfg=APPS[app_key],
+                           app_key=app_key, app_cfg=apps[app_key],
                            user=app_user(app_key),
                            result=None, error=error,
                            unmask_pending=unmask_pending,
@@ -354,7 +417,7 @@ def app_unmask_request(app_key):
 
 @app.get("/<app_key>/unmask/status/<token_id>")
 def app_unmask_status(app_key, token_id):
-    if app_key not in APPS:
+    if app_key not in get_apps():
         return jsonify({"error": "Unknown app"}), 404
     if not app_token(app_key):
         return jsonify({"error": "not authenticated"}), 401
