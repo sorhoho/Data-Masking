@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<configuration>
+    <midpoint>
+        <repository>
+            <type>native</type>
+            <jdbcUrl>jdbc:postgresql://postgres:5432/midpoint</jdbcUrl>
+            <jdbcUsername>midpoint</jdbcUsername>
+            <jdbcPassword>midpoint_pass</jdbcPassword>
+        </repository>
+        <keystore>
+            <keyStorePath>keystore.jceks</keyStorePath>
+            <keyStorePassword>changeit</keyStorePassword>
+            <encryptionKeyAlias>default</encryptionKeyAlias>
+        </keystore>
+    </midpoint>
+</configuration>

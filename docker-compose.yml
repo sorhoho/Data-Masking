@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
 
-  # ── PostgreSQL (shared by Keycloak and admin-service) ────────────────────────
+  # ── PostgreSQL (shared by Keycloak, admin-service, midPoint) ─────────────────
   postgres:
     image: postgres:16
     environment:
@@ -51,7 +51,7 @@ services:
   billing-mock:
     build: ./billing-mock
 
-  # ── Admin GUI (policy + VIP configuration) ───────────────────────────────
+  # ── Admin GUI — data masking policy + unmask approval ────────────────────
   admin-service:
     build: ./admin-service
     ports:
@@ -66,27 +66,23 @@ services:
       KEYCLOAK_REALM: "demo"
       KEYCLOAK_ADMIN_USER: "admin"
       KEYCLOAK_ADMIN_PASSWORD: "admin"
-    depends_on:
-      - postgres
-
-  # ── Identity Governance ───────────────────────────────────────────────────
-  governance-service:
-    build: ./governance-service
-    ports:
-      - "8889:8889"
-    environment:
-      KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
-      KEYCLOAK_REALM: "demo"
-      KEYCLOAK_ADMIN_USER: "admin"
-      KEYCLOAK_ADMIN_PASSWORD: "admin"
-      DATABASE_URL: "postgresql://adminuser:admin_pass@postgres:5432/admindb"
-      ADMIN_USER: "admin"
-      ADMIN_PASSWORD: "admin123"
-      SECRET_KEY: "governance-secret-change-in-production"
       GOVERNANCE_API_KEY: "governance-internal-key"
     depends_on:
       - postgres
-      - keycloak
+
+  # ── Identity Governance (midPoint IGA) ───────────────────────────────────
+  midpoint:
+    image: evolveum/midpoint:4.8-alpine
+    ports:
+      - "8090:8080"
+    environment:
+      MP_SET_midpoint_administrator_initialPassword: "admin123"
+    volumes:
+      - midpoint-home:/opt/midpoint/var
+      - ./midpoint/config/config.xml:/opt/midpoint/var/config/config.xml
+      - ./midpoint/post-initial-objects:/opt/midpoint/var/post-initial-objects
+    depends_on:
+      - postgres
     restart: on-failure
 
   # ── API Gateway (Kong) ────────────────────────────────────────────────────
@@ -106,7 +102,7 @@ services:
       KONG_UNTRUSTED_LUA: "on"
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KEYCLOAK_REALM: "demo"
-      GOVERNANCE_INTERNAL_URL: "http://governance-service:8889"
+      GOVERNANCE_INTERNAL_URL: "http://admin-service:8888"
     volumes:
       - ./kong:/kong
     ports:
@@ -117,7 +113,6 @@ services:
       - billing-mock
       - opa
       - admin-service
-      - governance-service
     restart: on-failure
 
   # ── Frontend Hub (portal + per-app OIDC frontends) ───────────────────────
@@ -130,7 +125,7 @@ services:
       KEYCLOAK_INTERNAL_URL: "http://keycloak:8080"
       KONG_URL: "http://kong:8000"
       OPA_URL: "http://opa:8181"
-      GOVERNANCE_INTERNAL_URL: "http://governance-service:8889"
+      GOVERNANCE_INTERNAL_URL: "http://admin-service:8888"
       GOVERNANCE_API_KEY: "governance-internal-key"
       SECRET_KEY: "hub-secret-change-in-production"
     depends_on:
@@ -159,3 +154,4 @@ networks:
 
 volumes:
   postgres-data:
+  midpoint-home:

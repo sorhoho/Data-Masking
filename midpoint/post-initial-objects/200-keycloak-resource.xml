@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Keycloak resource definition for midPoint.
+
+    Uses the generic REST connector to talk to Keycloak Admin REST API.
+    midPoint provisions users and realm-role assignments to Keycloak demo realm.
+
+    SETUP STEPS (one-time, via midPoint GUI at http://localhost:8090):
+    1. Log in: admin / admin123
+    2. Navigate: Resources → All Resources → "Keycloak Demo Realm"
+    3. Click "Test connection" — should return SUCCESS after Keycloak is up
+    4. Click "Import objects from resource" to pull existing Keycloak users
+    5. Assign midPoint roles to users; midPoint syncs back to Keycloak via provisioning
+
+    Admin REST API base: http://keycloak:8080/admin/realms/demo
+    Auth: POST /realms/master/protocol/openid-connect/token  (admin-cli, password grant)
+-->
+<resource xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
+          xmlns:icfs="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/resource-schema-3"
+          xmlns:ri="http://midpoint.evolveum.com/xml/ns/public/resource/instance-3"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          oid="b4a8b7e2-0000-0000-0000-000000000001">
+    <name>Keycloak Demo Realm</name>
+    <description>Keycloak demo realm — managed by midPoint IGA</description>
+
+    <!-- REST connector (bundled with midPoint) -->
+    <connectorRef type="ConnectorType">
+        <filter>
+            <q:equal xmlns:q="http://prism.evolveum.com/xml/ns/public/query-3">
+                <q:path>connectorType</q:path>
+                <q:value>com.evolveum.polygon.rest.RestConnector</q:value>
+            </q:equal>
+        </filter>
+    </connectorRef>
+
+    <connectorConfiguration>
+        <icfs:configurationProperties
+            xmlns:gen="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">
+            <gen:baseUrl>http://keycloak:8080</gen:baseUrl>
+            <gen:authenticationType>BASIC</gen:authenticationType>
+            <gen:username>admin</gen:username>
+            <gen:password><clearValue>admin</clearValue></gen:password>
+            <gen:tokenEndpoint>http://keycloak:8080/realms/master/protocol/openid-connect/token</gen:tokenEndpoint>
+        </icfs:configurationProperties>
+    </connectorConfiguration>
+
+    <schemaHandling>
+        <!-- User accounts in the Keycloak demo realm -->
+        <objectType>
+            <kind>account</kind>
+            <intent>default</intent>
+            <displayName>Keycloak User</displayName>
+            <default>true</default>
+            <objectClass>ri:AccountObjectClass</objectClass>
+            <attribute>
+                <ref>icfs:name</ref>
+                <displayName>Username</displayName>
+                <outbound>
+                    <source><path>$user/name</path></source>
+                </outbound>
+            </attribute>
+            <attribute>
+                <ref>ri:email</ref>
+                <outbound>
+                    <source><path>$user/emailAddress</path></source>
+                </outbound>
+            </attribute>
+        </objectType>
+    </schemaHandling>
+
+    <synchronization>
+        <objectSynchronization>
+            <objectClass>ri:AccountObjectClass</objectClass>
+            <kind>account</kind>
+            <intent>default</intent>
+            <enabled>true</enabled>
+            <reaction>
+                <situation>linked</situation>
+                <action><handlerUri>http://midpoint.evolveum.com/xml/ns/public/model/action-3#modifyUser</handlerUri></action>
+            </reaction>
+            <reaction>
+                <situation>deleted</situation>
+                <action><handlerUri>http://midpoint.evolveum.com/xml/ns/public/model/action-3#unlinkAccount</handlerUri></action>
+            </reaction>
+            <reaction>
+                <situation>unlinked</situation>
+                <action><handlerUri>http://midpoint.evolveum.com/xml/ns/public/model/action-3#linkAccount</handlerUri></action>
+            </reaction>
+            <reaction>
+                <situation>unmatched</situation>
+                <action><handlerUri>http://midpoint.evolveum.com/xml/ns/public/model/action-3#addUser</handlerUri></action>
+            </reaction>
+        </objectSynchronization>
+    </synchronization>
+</resource>

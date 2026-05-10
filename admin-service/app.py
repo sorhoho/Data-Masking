@@ -26,6 +26,10 @@ KEYCLOAK_REALM        = os.environ.get("KEYCLOAK_REALM",         "demo")
 KEYCLOAK_ADMIN_USER   = os.environ.get("KEYCLOAK_ADMIN_USER",    "admin")
 KEYCLOAK_ADMIN_PASS   = os.environ.get("KEYCLOAK_ADMIN_PASSWORD", "admin")
 
+GOVERNANCE_API_KEY  = os.environ.get("GOVERNANCE_API_KEY", "governance-internal-key")
+UNMASK_REASON_CODES = ["FRAUD_INVESTIGATION", "COMPLIANCE_AUDIT", "LEGAL_HOLD",
+                       "CUSTOMER_DISPUTE", "TECHNICAL_ESCALATION", "REGULATOR_REQUEST"]
+
 # Ordered list of (field, classification) — drives both DB and UI
 FIELDS = [
     ("name",               "L1"),
@@ -37,6 +41,7 @@ FIELDS = [
     ("data_roaming_gb",    "L2"),
     ("last_location",      "L2"),
 ]
+UNMASK_FIELDS = [f for f, _ in FIELDS]
 ROLES = [
     # Legacy
     "agent", "supervisor", "vip_agent", "admin", "partner",
@@ -307,6 +312,23 @@ def init_db():
             fields                     TEXT[]  NOT NULL DEFAULT '{}',
             enabled                    BOOLEAN NOT NULL DEFAULT true,
             created_at                 TEXT    NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS unmask_sessions (
+            id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id      TEXT        NOT NULL DEFAULT '',
+            username     TEXT        NOT NULL,
+            customer_id  TEXT        NOT NULL,
+            fields       TEXT[]      NOT NULL DEFAULT '{}',
+            reason_code  TEXT        NOT NULL,
+            ticket_ref   TEXT        NOT NULL DEFAULT '',
+            notes        TEXT        NOT NULL DEFAULT '',
+            status       TEXT        NOT NULL DEFAULT 'pending',
+            requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reviewed_at  TIMESTAMPTZ,
+            reviewed_by  TEXT,
+            expires_at   TIMESTAMPTZ,
+            first_used_at TIMESTAMPTZ,
+            used_at      TIMESTAMPTZ
         )""",
     ]
     for stmt in stmts:
@@ -971,6 +993,292 @@ def manual_sync():
 @login_required
 def api_config():
     return jsonify(get_config())
+
+
+# ── Keycloak Admin API helpers ────────────────────────────────────────────────
+
+def _kc_token():
+    r = requests.post(
+        f"{KEYCLOAK_INTERNAL_URL}/realms/master/protocol/openid-connect/token",
+        data={"client_id": "admin-cli", "grant_type": "password",
+              "username": KEYCLOAK_ADMIN_USER, "password": KEYCLOAK_ADMIN_PASS},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+
+def _kc_users_with_roles():
+    token   = _kc_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    users   = requests.get(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users?max=200",
+        headers=headers, timeout=10,
+    )
+    users.raise_for_status()
+    result = users.json()
+    for u in result:
+        roles = requests.get(
+            f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+            f"/users/{u['id']}/role-mappings/realm",
+            headers=headers, timeout=10,
+        ).json()
+        u["app_roles"] = [r["name"] for r in roles
+                          if not r["name"].startswith("default-roles")]
+    return result
+
+
+def _kc_role_obj(token, role_name):
+    r = requests.get(
+        f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/roles/{role_name}",
+        headers={"Authorization": f"Bearer {token}"}, timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+# ── User lifecycle routes ─────────────────────────────────────────────────────
+
+@app.get("/users")
+@login_required
+def users_list():
+    try:
+        users = _kc_users_with_roles()
+        error = None
+    except Exception as exc:
+        users, error = [], str(exc)
+    return render_template("users.html", users=users, roles=ROLES, error=error)
+
+
+@app.post("/users/add")
+@login_required
+def users_add():
+    username   = (request.form.get("username")   or "").strip()
+    email      = (request.form.get("email")      or "").strip()
+    first_name = (request.form.get("first_name") or "").strip()
+    last_name  = (request.form.get("last_name")  or "").strip()
+    password   = (request.form.get("password")   or "").strip()
+    role       = (request.form.get("role")       or "").strip()
+    if not username or not password:
+        flash("Username and password are required", "danger")
+        return redirect(url_for("users_list"))
+    try:
+        token   = _kc_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        payload = {"username": username, "enabled": True,
+                   "credentials": [{"type": "password", "value": password, "temporary": True}]}
+        if email:      payload["email"]     = email
+        if first_name: payload["firstName"] = first_name
+        if last_name:  payload["lastName"]  = last_name
+        r = requests.post(
+            f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users",
+            headers=headers, json=payload, timeout=10,
+        )
+        r.raise_for_status()
+        user_id = r.headers.get("Location", "").rstrip("/").split("/")[-1]
+        if role and user_id:
+            rd = _kc_role_obj(token, role)
+            requests.post(
+                f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+                f"/users/{user_id}/role-mappings/realm",
+                headers=headers, json=[{"id": rd["id"], "name": role}], timeout=10,
+            )
+        flash(f"User '{username}' created" + (f" with role '{role}'" if role else ""), "success")
+    except Exception as exc:
+        flash(f"Error: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/users/<user_id>/roles/save")
+@login_required
+def users_roles_save(user_id):
+    selected = [r for r in ROLES if request.form.get(f"role__{r}")]
+    username = request.form.get("username", user_id)
+    try:
+        token   = _kc_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        existing = requests.get(
+            f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+            f"/users/{user_id}/role-mappings/realm",
+            headers=headers, timeout=10,
+        ).json()
+        non_default = [r for r in existing if not r["name"].startswith("default-roles")]
+        if non_default:
+            requests.delete(
+                f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+                f"/users/{user_id}/role-mappings/realm",
+                headers=headers, json=non_default, timeout=10,
+            )
+        if selected:
+            role_objs = [_kc_role_obj(token, rname) for rname in selected]
+            role_objs = [{"id": rd["id"], "name": rd["name"]} for rd in role_objs]
+            requests.post(
+                f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+                f"/users/{user_id}/role-mappings/realm",
+                headers=headers, json=role_objs, timeout=10,
+            )
+        flash(f"Roles saved for '{username}'", "success")
+    except Exception as exc:
+        flash(f"Error: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/users/<user_id>/offboard")
+@login_required
+def users_offboard(user_id):
+    username = request.form.get("username", user_id)
+    try:
+        token = _kc_token()
+        requests.put(
+            f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}/users/{user_id}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"enabled": False}, timeout=10,
+        ).raise_for_status()
+        flash(f"'{username}' offboarded — account disabled, all sessions revoked", "success")
+    except Exception as exc:
+        flash(f"Error: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+# ── API key auth decorator ────────────────────────────────────────────────────
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key = (request.headers.get("X-Governance-API-Key")
+               or request.headers.get("X-Api-Key", ""))
+        if key != GOVERNANCE_API_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ── Unmask admin UI ───────────────────────────────────────────────────────────
+
+@app.get("/unmask")
+@login_required
+def unmask_list():
+    status_filter = request.args.get("status", "pending")
+    conn          = get_db()
+    sessions      = qrows(conn,
+        "SELECT * FROM unmask_sessions WHERE status = %s ORDER BY requested_at DESC",
+        (status_filter,))
+    pending_count = scalar(conn,
+        "SELECT COUNT(*) FROM unmask_sessions WHERE status = 'pending'")
+    conn.close()
+    return render_template("unmask.html", sessions=sessions,
+                           status_filter=status_filter, pending_count=pending_count,
+                           reason_codes=UNMASK_REASON_CODES, all_fields=UNMASK_FIELDS)
+
+
+@app.post("/unmask/<token_id>/approve")
+@login_required
+def unmask_approve(token_id):
+    conn = get_db()
+    execute(conn,
+        """UPDATE unmask_sessions
+           SET status = 'approved', reviewed_at = NOW(), reviewed_by = %s,
+               expires_at = NOW() + INTERVAL '15 minutes'
+           WHERE id = %s AND status = 'pending'""",
+        (ADMIN_USER, token_id))
+    conn.commit()
+    conn.close()
+    flash("Unmask session approved — valid for 15 minutes", "success")
+    return redirect(url_for("unmask_list"))
+
+
+@app.post("/unmask/<token_id>/reject")
+@login_required
+def unmask_reject(token_id):
+    conn = get_db()
+    execute(conn,
+        """UPDATE unmask_sessions
+           SET status = 'rejected', reviewed_at = NOW(), reviewed_by = %s
+           WHERE id = %s AND status = 'pending'""",
+        (ADMIN_USER, token_id))
+    conn.commit()
+    conn.close()
+    flash("Unmask session rejected", "success")
+    return redirect(url_for("unmask_list"))
+
+
+# ── Unmask API (frontend-hub, API key auth) ───────────────────────────────────
+
+@app.post("/api/unmask/request")
+@require_api_key
+def api_unmask_request():
+    body        = request.get_json(force=True) or {}
+    user_id     = body.get("user_id", "")
+    username    = body.get("username", "")
+    customer_id = body.get("customer_id", "")
+    fields      = body.get("fields", [])
+    reason_code = body.get("reason_code", "")
+    ticket_ref  = body.get("ticket_ref", "")
+    notes       = body.get("notes", "")
+    if not username or not customer_id or not fields or not reason_code:
+        return jsonify({"error": "username, customer_id, fields, reason_code required"}), 400
+    conn = get_db()
+    row  = qone(conn,
+        """INSERT INTO unmask_sessions
+           (user_id, username, customer_id, fields, reason_code, ticket_ref, notes)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (user_id, username, customer_id, fields, reason_code, ticket_ref, notes))
+    conn.commit()
+    conn.close()
+    return jsonify({"token_id": str(row["id"]), "status": "pending"})
+
+
+@app.get("/api/unmask/status/<token_id>")
+@require_api_key
+def api_unmask_status(token_id):
+    conn = get_db()
+    row  = qone(conn, "SELECT * FROM unmask_sessions WHERE id = %s", (token_id,))
+    conn.close()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({
+        "token_id":   str(row["id"]),
+        "status":     row["status"],
+        "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+        "fields":     list(row["fields"] or []),
+        "consumed":   row["used_at"] is not None,
+    })
+
+
+# ── Unmask validation (Kong, internal network, no auth) ───────────────────────
+
+@app.get("/unmask/validate/<token_id>")
+def unmask_validate(token_id):
+    customer_id = request.args.get("customer_id", "")
+    conn = get_db()
+    row  = qone(conn, "SELECT * FROM unmask_sessions WHERE id = %s", (token_id,))
+    if not row:
+        conn.close()
+        return jsonify({"valid": False, "reason": "not_found"})
+    if row["status"] != "approved":
+        conn.close()
+        return jsonify({"valid": False, "reason": row["status"]})
+    expired = scalar(conn,
+        "SELECT expires_at IS NOT NULL AND expires_at < NOW() "
+        "FROM unmask_sessions WHERE id = %s", (token_id,))
+    if expired:
+        conn.close()
+        return jsonify({"valid": False, "reason": "expired"})
+    if customer_id and row["customer_id"] != customer_id:
+        conn.close()
+        return jsonify({"valid": False, "reason": "customer_mismatch"})
+    if not row["first_used_at"]:
+        execute(conn,
+            "UPDATE unmask_sessions SET first_used_at = NOW(), used_at = NOW() WHERE id = %s",
+            (token_id,))
+        conn.commit()
+    conn.close()
+    return jsonify({
+        "valid":       True,
+        "fields":      list(row["fields"] or []),
+        "reason_code": row["reason_code"],
+        "username":    row["username"],
+    })
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────

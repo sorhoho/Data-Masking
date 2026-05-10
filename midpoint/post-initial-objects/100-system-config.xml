@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Basic system configuration.
+    Applied once after midPoint initialises on first start.
+-->
+<systemConfiguration xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
+                     xmlns:c="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
+                     oid="00000000-0000-0000-0000-000000000001">
+    <name>SystemConfiguration</name>
+    <globalSecurityPolicyRef oid="00000000-0000-0000-0000-000000000120" type="SecurityPolicyType"/>
+    <audit>
+        <appender>
+            <name>JDBC Audit</name>
+            <implementation>
+                <className>com.evolveum.midpoint.audit.impl.LogbackAuditAppender</className>
+            </implementation>
+        </appender>
+    </audit>
+    <internals>
+        <consistency>
+            <skipOwnershipCheck>false</skipOwnershipCheck>
+        </consistency>
+    </internals>
+    <notificationConfiguration>
+        <handler>
+            <simpleUserNotifier>
+                <expressionFilter>
+                    <script>
+                        <code>requestee != null</code>
+                    </script>
+                </expressionFilter>
+                <transport>dummy:default</transport>
+            </simpleUserNotifier>
+        </handler>
+        <mail>
+            <debug>true</debug>
+        </mail>
+    </notificationConfiguration>
+    <adminGuiConfiguration>
+        <homePage>
+            <widget>
+                <identifier>myWorkItems</identifier>
+            </widget>
+            <widget>
+                <identifier>myRequests</identifier>
+            </widget>
+        </homePage>
+    </adminGuiConfiguration>
+</systemConfiguration>

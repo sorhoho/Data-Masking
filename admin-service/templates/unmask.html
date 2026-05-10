@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Unmask Approval – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128275; Unmask Session Approval
+    {% if pending_count %}<span class="badge bg-danger ms-2">{{ pending_count }}</span>{% endif %}
+  </h4>
+</div>
+
+{# ── Status filter tabs ───────────────────────────────────────────────────── #}
+<ul class="nav nav-tabs mb-4">
+  {% for s, label in [('pending','Pending'), ('approved','Approved'), ('rejected','Rejected')] %}
+  <li class="nav-item">
+    <a class="nav-link {% if status_filter == s %}active{% endif %}"
+       href="/unmask?status={{ s }}">
+      {{ label }}
+      {% if s == 'pending' and pending_count %}
+        <span class="badge bg-danger ms-1">{{ pending_count }}</span>
+      {% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+
+{% if sessions %}
+<div class="table-responsive">
+  <table class="table table-hover align-middle">
+    <thead class="table-light">
+      <tr>
+        <th>Requested</th>
+        <th>Requester</th>
+        <th>Customer</th>
+        <th>Fields</th>
+        <th>Reason</th>
+        <th>Ticket</th>
+        {% if status_filter != 'pending' %}<th>Reviewed</th>{% endif %}
+        {% if status_filter == 'approved' %}<th>Expires</th>{% endif %}
+        {% if status_filter == 'pending' %}<th class="text-end">Actions</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sessions %}
+      <tr>
+        <td class="small text-muted text-nowrap">{{ s.requested_at.strftime('%Y-%m-%d %H:%M') if s.requested_at else '—' }}</td>
+        <td>
+          <code class="fw-bold">{{ s.username }}</code>
+          {% if s.user_id %}<br><span class="text-muted small">{{ s.user_id }}</span>{% endif %}
+        </td>
+        <td><code>{{ s.customer_id }}</code></td>
+        <td>
+          {% for f in s.fields %}
+            <span class="badge bg-secondary me-1 mb-1" style="font-size:.7em">{{ f }}</span>
+          {% endfor %}
+        </td>
+        <td>
+          <span class="badge bg-dark" style="font-size:.75em">{{ s.reason_code }}</span>
+          {% if s.notes %}<br><small class="text-muted">{{ s.notes[:80] }}</small>{% endif %}
+        </td>
+        <td class="small">{{ s.ticket_ref or '—' }}</td>
+        {% if status_filter != 'pending' %}
+        <td class="small text-muted text-nowrap">
+          {{ s.reviewed_at.strftime('%Y-%m-%d %H:%M') if s.reviewed_at else '—' }}
+          {% if s.reviewed_by %}<br><code class="small">{{ s.reviewed_by }}</code>{% endif %}
+        </td>
+        {% endif %}
+        {% if status_filter == 'approved' %}
+        <td class="small text-nowrap">
+          {% if s.expires_at %}
+            <span class="{% if s.expires_at < now %}text-danger{% else %}text-success{% endif %}">
+              {{ s.expires_at.strftime('%H:%M') }}
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        {% endif %}
+        {% if status_filter == 'pending' %}
+        <td class="text-end text-nowrap">
+          <form method="post" action="/unmask/{{ s.id }}/approve" class="d-inline">
+            <button class="btn btn-sm btn-success" type="submit">Approve</button>
+          </form>
+          <form method="post" action="/unmask/{{ s.id }}/reject" class="d-inline ms-1">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-muted text-center py-5">
+  No {{ status_filter }} unmask sessions.
+</div>
+{% endif %}
+
+{# ── Info panel ───────────────────────────────────────────────────────────── #}
+<div class="alert alert-secondary mt-4 small">
+  <strong>How it works:</strong>
+  Agents request unmask via the portal — the request lands here as <em>pending</em>.
+  Approving grants a 15-minute token that Kong validates on each proxied API call.
+  The token is single-journey: first use stamps <code>first_used_at</code>; expiry terminates access.
+  Rejected sessions cannot be re-opened — the agent must submit a new request.
+</div>
+{% endblock %}

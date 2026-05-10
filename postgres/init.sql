@@ -7,3 +7,10 @@ GRANT ALL PRIVILEGES ON DATABASE admindb TO adminuser;
 -- Connect to admindb and grant schema-level privileges explicitly.
 \connect admindb
 GRANT ALL ON SCHEMA public TO adminuser;
+
+-- midPoint IGA database
+CREATE DATABASE midpoint;
+CREATE USER midpoint WITH PASSWORD 'midpoint_pass';
+GRANT ALL PRIVILEGES ON DATABASE midpoint TO midpoint;
+\connect midpoint
+GRANT ALL ON SCHEMA public TO midpoint;
