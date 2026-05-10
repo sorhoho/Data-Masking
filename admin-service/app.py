@@ -477,6 +477,9 @@ def get_config():
         "condition_channels, condition_in_working_hours, action, fields, enabled "
         "FROM masking_rules ORDER BY priority, id"
     )
+    app_role_rows = qrows(conn,
+        "SELECT app_id, role FROM app_roles ORDER BY app_id, role"
+    )
     conn.close()
 
     customer_tiers = {row["customer_id"]: row["tier"] for row in tier_rows}
@@ -496,13 +499,11 @@ def get_config():
             "classification": row["classification"],
         }
 
-    # App roles: midPoint is authoritative; DB is fallback
+    # App roles: midPoint is authoritative; DB rows fetched above are fallback
     mp_roles, _from_mp = _mp_app_roles()
     if mp_roles is not None:
         app_roles = mp_roles
     else:
-        app_role_rows = qrows(conn,
-            "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
         app_roles = {}
         for row in app_role_rows:
             app_roles.setdefault(row["app_id"], []).append(row["role"])
