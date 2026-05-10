@@ -69,7 +69,7 @@ services:
       GOVERNANCE_API_KEY: "governance-internal-key"
       MIDPOINT_URL: "http://midpoint:8080"
       MIDPOINT_ADMIN_USER: "administrator"
-      MIDPOINT_ADMIN_PASS: "Admin123!"
+      MIDPOINT_ADMIN_PASS: "5ecr3t"
     depends_on:
       - postgres
       - midpoint
