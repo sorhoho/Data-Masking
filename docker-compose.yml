@@ -67,8 +67,12 @@ services:
       KEYCLOAK_ADMIN_USER: "admin"
       KEYCLOAK_ADMIN_PASSWORD: "admin"
       GOVERNANCE_API_KEY: "governance-internal-key"
+      MIDPOINT_URL: "http://midpoint:8080"
+      MIDPOINT_ADMIN_USER: "administrator"
+      MIDPOINT_ADMIN_PASS: "Admin123!"
     depends_on:
       - postgres
+      - midpoint
 
   # ── Identity Governance (midPoint IGA) ───────────────────────────────────
   midpoint:

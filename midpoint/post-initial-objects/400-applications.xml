@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Application registry — one midPoint Service object per application.
+    "subtype" values = Keycloak realm roles allowed to call this app.
+    Empty subtype list = open (any authenticated role may access).
+
+    admin-service reads these via REST API when building the OPA bundle.
+    Edit roles here in midPoint; changes propagate to OPA within 5 minutes
+    (admin-service cache TTL) + up to 60s (OPA bundle poll interval).
+-->
+<objects xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3">
+
+    <service oid="a0000000-0000-0000-0001-000000000001">
+        <name>agent-portal</name>
+        <displayName>Agent Portal</displayName>
+        <description>Care agent and billing web app — front-line access</description>
+        <subtype>agent</subtype>
+        <subtype>care_l1</subtype>
+        <subtype>care_l2</subtype>
+        <subtype>billing_agent</subtype>
+        <subtype>noc_operator</subtype>
+        <subtype>field_technician</subtype>
+        <subtype>roaming_ops</subtype>
+    </service>
+
+    <service oid="a0000000-0000-0000-0001-000000000002">
+        <name>supervisor-dashboard</name>
+        <displayName>Supervisor Dashboard</displayName>
+        <description>Team lead and supervisor UI</description>
+        <subtype>supervisor</subtype>
+        <subtype>care_supervisor</subtype>
+        <subtype>vip_agent</subtype>
+        <subtype>vip_care</subtype>
+        <subtype>admin</subtype>
+        <subtype>data_admin</subtype>
+    </service>
+
+    <service oid="a0000000-0000-0000-0001-000000000003">
+        <name>fraud-console</name>
+        <displayName>Fraud Console</displayName>
+        <description>Fraud analyst investigation tool</description>
+        <subtype>fraud_analyst</subtype>
+        <subtype>compliance_officer</subtype>
+        <subtype>admin</subtype>
+        <subtype>data_admin</subtype>
+    </service>
+
+    <service oid="a0000000-0000-0000-0001-000000000004">
+        <name>audit-viewer-app</name>
+        <displayName>Audit Viewer</displayName>
+        <description>Compliance read-only portal</description>
+        <subtype>audit_viewer</subtype>
+        <subtype>compliance_officer</subtype>
+        <subtype>admin</subtype>
+    </service>
+
+    <service oid="a0000000-0000-0000-0001-000000000005">
+        <name>partner-api</name>
+        <displayName>Partner API</displayName>
+        <description>B2B/MVNO partner BFF — external partner access only</description>
+        <subtype>partner</subtype>
+        <subtype>b2b_partner</subtype>
+        <subtype>mvno_partner</subtype>
+    </service>
+
+</objects>

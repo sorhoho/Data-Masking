@@ -30,6 +30,11 @@ GOVERNANCE_API_KEY  = os.environ.get("GOVERNANCE_API_KEY", "governance-internal-
 UNMASK_REASON_CODES = ["FRAUD_INVESTIGATION", "COMPLIANCE_AUDIT", "LEGAL_HOLD",
                        "CUSTOMER_DISPUTE", "TECHNICAL_ESCALATION", "REGULATOR_REQUEST"]
 
+MIDPOINT_URL        = os.environ.get("MIDPOINT_URL",        "http://midpoint:8080")
+MIDPOINT_ADMIN_USER = os.environ.get("MIDPOINT_ADMIN_USER", "administrator")
+MIDPOINT_ADMIN_PASS = os.environ.get("MIDPOINT_ADMIN_PASS", "Admin123!")
+MP_CACHE_TTL        = 300  # seconds
+
 # Ordered list of (field, classification) — drives both DB and UI
 FIELDS = [
     ("name",               "L1"),
@@ -197,6 +202,48 @@ _DEFAULT_APP_ROLES = [
     # Partner API: external partners only
     ("partner-api", "partner"), ("partner-api", "b2b_partner"), ("partner-api", "mvno_partner"),
 ]
+
+
+# ── midPoint app-role cache ───────────────────────────────────────────────────
+
+_mp_cache: dict = {"app_roles": None, "fetched_at": 0.0}
+
+
+def _mp_app_roles():
+    """Fetch app→allowed-roles from midPoint Service objects (subtype field).
+    Returns (dict|None, bool): (data, from_midpoint). Stale cache used on error."""
+    now = time.time()
+    if (_mp_cache["app_roles"] is not None
+            and now - _mp_cache["fetched_at"] < MP_CACHE_TTL):
+        return _mp_cache["app_roles"], True
+    try:
+        r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/services",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=5,
+        )
+        r.raise_for_status()
+        raw_list = r.json().get("object", {}).get("object", [])
+        if isinstance(raw_list, dict):
+            raw_list = [raw_list]
+        result = {}
+        for svc in raw_list:
+            name = svc.get("name", "")
+            if isinstance(name, dict):
+                name = name.get("orig", "")
+            subtypes = svc.get("subtype", [])
+            if isinstance(subtypes, str):
+                subtypes = [subtypes]
+            if name:
+                result[name] = list(subtypes)
+        _mp_cache["app_roles"]  = result
+        _mp_cache["fetched_at"] = now
+        return result, True
+    except Exception:
+        if _mp_cache["app_roles"] is not None:
+            return _mp_cache["app_roles"], True   # stale cache better than nothing
+        return None, False
 
 
 # ── Database helpers ──────────────────────────────────────────────────────────
@@ -422,9 +469,6 @@ def get_config():
         "SELECT backend_id, backend_field, canonical_field, classification "
         "FROM field_mappings ORDER BY backend_id, backend_field"
     )
-    app_role_rows = qrows(conn,
-        "SELECT app_id, role FROM app_roles ORDER BY app_id, role"
-    )
     purpose_rows  = qrows(conn,
         "SELECT role, purpose, field FROM purpose_policies ORDER BY role, purpose, field"
     )
@@ -452,9 +496,16 @@ def get_config():
             "classification": row["classification"],
         }
 
-    app_roles = {}
-    for row in app_role_rows:
-        app_roles.setdefault(row["app_id"], []).append(row["role"])
+    # App roles: midPoint is authoritative; DB is fallback
+    mp_roles, _from_mp = _mp_app_roles()
+    if mp_roles is not None:
+        app_roles = mp_roles
+    else:
+        app_role_rows = qrows(conn,
+            "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+        app_roles = {}
+        for row in app_role_rows:
+            app_roles.setdefault(row["app_id"], []).append(row["role"])
 
     purpose_overrides = {}
     for row in purpose_rows:
@@ -904,6 +955,80 @@ def simulate():
                            roles=ROLES, purposes=PURPOSES,
                            all_fields=all_fields, result=result,
                            error=error, form=form)
+
+
+# ── Application registry ─────────────────────────────────────────────────────
+
+@app.get("/apps")
+@login_required
+def apps_list():
+    conn          = get_db()
+    apps          = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
+    mp_roles, from_mp = _mp_app_roles()
+    if mp_roles is not None:
+        app_role_map = mp_roles
+    else:
+        rows = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+        app_role_map = {}
+        for r in rows:
+            app_role_map.setdefault(r["app_id"], []).append(r["role"])
+    conn.close()
+    return render_template("apps.html", apps=apps, app_role_map=app_role_map,
+                           roles=ROLES, mp_source=from_mp)
+
+
+@app.post("/apps/add")
+@login_required
+def apps_add():
+    app_id = (request.form.get("app_id")       or "").strip().lower()
+    name   = (request.form.get("name")         or "").strip()
+    url    = (request.form.get("upstream_url") or "").strip()
+    desc   = (request.form.get("description")  or "").strip()
+    if not app_id or not name:
+        flash("App ID and name are required", "danger")
+        return redirect(url_for("apps_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, 'admin', %s)",
+            (app_id, name, url, desc, datetime.utcnow().isoformat()))
+        conn.commit()
+        flash(f"App '{app_id}' registered. Add its allowed roles in midPoint → Services.", "success")
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        flash(f"App ID '{app_id}' already exists", "warning")
+    finally:
+        conn.close()
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/remove/<app_id>")
+@login_required
+def apps_remove(app_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM apps WHERE app_id = %s", (app_id,))
+    conn.commit()
+    conn.close()
+    flash(f"App '{app_id}' removed from registry. Also delete Service in midPoint if needed.", "success")
+    return redirect(url_for("apps_list"))
+
+
+@app.post("/apps/<app_id>/roles/save")
+@login_required
+def apps_roles_save(app_id):
+    """DB-only fallback — only effective when midPoint is unreachable."""
+    selected = [r for r in ROLES if request.form.get(f"role__{r}")]
+    conn     = get_db()
+    execute(conn, "DELETE FROM app_roles WHERE app_id = %s", (app_id,))
+    if selected:
+        executemany(conn, "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
+                    [(app_id, r) for r in selected])
+    conn.commit()
+    conn.close()
+    sync_to_opa()
+    flash(f"Roles saved to DB for '{app_id}' (DB fallback — midPoint takes priority when available)", "warning")
+    return redirect(url_for("apps_list"))
 
 
 # ── Dynamic rule engine ──────────────────────────────────────────────────────
