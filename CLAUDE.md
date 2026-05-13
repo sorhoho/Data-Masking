@@ -38,8 +38,9 @@ Transform abstract tasks into testable objectives with clear verification steps 
 - `kong/kong.yml` — Lua pre/post-function plugins: JWT RS256 verification, OPA call, response masking, audit log
 - `opa/policy.rego` — Rego v1 (`import rego.v1`), entry point is `data.data_masking.decision`
 - `opa/opa-config.yaml` — Bundle polling from admin-service every 15–60 s
-- `admin-service/app.py` — Serves `/bundle/masking_config.tar.gz`; manages customer tiers, role masks, app registry, user lifecycle (Keycloak Admin API)
-- `admin-service/templates/` — Flask/Jinja2 UI: dashboard, tiers, roles, backends, apps, users
+- `admin-service/app.py` — Serves `/bundle/masking_config.tar.gz`; manages customer tiers, role masks, app registry, dynamic rules, user lifecycle (Keycloak Admin API)
+- `admin-service/templates/` — Flask/Jinja2 UI: dashboard, tiers, roles, backends, apps, rules, users
+- `frontend-hub/app.py` — Multi-app OAuth portal; lazy OAuth client registration; authlib 1.3.1 ID-token parse errors caught and recovered via `oa.token` fallback
 - `keycloak/realm-config.json` — Realm `demo`, clients, roles, users
 - `postgres/init.sql` — Creates `admindb` + `adminuser`; must `GRANT ALL ON SCHEMA public`
 - `grafana/loki-config.yaml` — Loki 3.x TSDB config (BoltDB removed in 3.0)
@@ -66,9 +67,11 @@ VIP access still requires `X-Access-Reference` header (Kong enforces, logs alert
 ### Application Registry
 - `apps` table in admin-service DB; role grants stored in `app_roles` table
 - Included in OPA bundle as `data.masking_config.app_roles: {app_id: [roles]}`
-- OPA rule: `app_role_allowed` passes if backend has no registered role list (open) OR `input.role` is in the allowed list
+- OPA rule: `app_role_allowed` passes if app has no registered role list (open) OR `input.role` is in the allowed list
 - `effective_allow = allow AND app_role_allowed`
 - Admin UI at `/apps` — register apps, set allowed roles per app, syncs to OPA bundle
+- `input.app_id` = JWT `azp` claim (Keycloak `client_id`) — Kong extracts and sends to OPA
+- **Per-app masking**: use dynamic rules with `condition_apps` to add/remove field masking for specific apps (see Dynamic Rule Engine)
 
 ### User Lifecycle (Keycloak Admin API)
 - Admin-service calls Keycloak Admin REST API using `admin-cli` client with master-realm credentials
@@ -105,6 +108,24 @@ Full matrix managed in admin-service UI at `/roles`. Key role groups:
 | Standard | agent, supervisor, billing_agent, noc_operator, field_technician, roaming_ops, audit_viewer | role-specific subsets |
 | Partners | partner, b2b_partner, mvno_partner | most PII fields; standard tier only |
 
+### Dynamic Rule Engine
+Stored in `masking_rules` table. Rules evaluated in priority order (lower number first). Conditions are AND-ed; empty list in any condition = matches all.
+
+| Condition field | Type | Matches |
+|----------------|------|---------|
+| `condition_roles` | `TEXT[]` | `input.role` |
+| `condition_tiers` | `TEXT[]` | `customer_tier` |
+| `condition_purposes` | `TEXT[]` | `X-Purpose` header |
+| `condition_channels` | `TEXT[]` | `X-Channel` header |
+| `condition_apps` | `TEXT[]` | `input.app_id` (JWT `azp`) |
+| `condition_in_working_hours` | `BOOLEAN\|NULL` | time check; NULL = any |
+
+Actions: `mask` (add fields to masked set) or `unmask` (remove from masked set). `unmask` overrides `mask` when both match the same field.
+
+OPA helpers: `_roles_match`, `_tiers_match`, `_purposes_match`, `_channels_match`, `_apps_match`, `_wh_matches` — all follow same pattern: empty collection passes, non-empty checks membership.
+
+Admin UI at `/rules`. DB column `condition_apps` added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on startup (safe for existing installs).
+
 ### Admin-service DB Tables
 | Table | Purpose |
 |-------|---------|
@@ -114,7 +135,16 @@ Full matrix managed in admin-service UI at `/roles`. Key role groups:
 | `field_mappings` | backend field → canonical field alias mapping |
 | `apps` | registered applications (id, name, upstream_url) |
 | `app_roles` | app_id × role — which roles may access each app |
+| `purpose_policies` | role × purpose × field — field exemptions by purpose |
+| `masking_rules` | dynamic rules: priority, conditions (roles/tiers/purposes/channels/apps/hours), action, fields |
 | `sync_log` | audit trail of OPA bundle sync events |
+
+### Frontend Hub (`:3001`)
+- `frontend-hub/app.py` — Flask app; 5 static OAuth clients + dynamic discovery from admin-service `/api/apps` (5-min TTL cache)
+- OAuth clients registered lazily via `_oa(app_key)` on first use; `_registered_oauth_keys` set prevents double-registration
+- **authlib 1.3.1 gotcha**: `authorize_access_token()` calls `parse_id_token()` internally; if ID-token claim validation fails (nonce/at_hash mismatch, key issues), exception propagates even though the access-token exchange already succeeded. Fix: wrap in try/except and fall back to `oa.token` (stored in Flask `g` before validation runs). Userinfo is fetched separately via `requests.get(userinfo_endpoint)` anyway.
+- `KEYCLOAK_URL` (public, browser-facing) vs `KEYCLOAK_INTERNAL_URL` (Docker-internal, used for token/userinfo/jwks endpoints)
+- `GET /api/apps` on admin-service requires `X-Governance-API-Key` header
 
 ### Development Branch
 Always develop on `claude/keycloak-kong-integration-yIVJ1` and push there.
