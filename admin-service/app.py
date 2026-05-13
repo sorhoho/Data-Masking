@@ -204,9 +204,15 @@ _DEFAULT_APP_ROLES = [
 ]
 
 
-# ── midPoint app-role cache ───────────────────────────────────────────────────
+# ── midPoint app-role cache + write helpers ───────────────────────────────────
 
-_mp_cache: dict = {"app_roles": None, "fetched_at": 0.0}
+_mp_cache: dict = {"app_roles": None, "service_oids": {}, "fetched_at": 0.0}
+
+
+def _mp_invalidate():
+    _mp_cache["app_roles"]    = None
+    _mp_cache["service_oids"] = {}
+    _mp_cache["fetched_at"]   = 0.0
 
 
 def _mp_app_roles():
@@ -228,22 +234,118 @@ def _mp_app_roles():
         if isinstance(raw_list, dict):
             raw_list = [raw_list]
         result = {}
+        oids   = {}
         for svc in raw_list:
             name = svc.get("name", "")
             if isinstance(name, dict):
                 name = name.get("orig", "")
+            oid      = svc.get("oid", "")
             subtypes = svc.get("subtype", [])
             if isinstance(subtypes, str):
                 subtypes = [subtypes]
             if name:
                 result[name] = list(subtypes)
-        _mp_cache["app_roles"]  = result
-        _mp_cache["fetched_at"] = now
+                if oid:
+                    oids[name] = oid
+        _mp_cache["app_roles"]    = result
+        _mp_cache["service_oids"] = oids
+        _mp_cache["fetched_at"]   = now
         return result, True
     except Exception:
         if _mp_cache["app_roles"] is not None:
             return _mp_cache["app_roles"], True   # stale cache better than nothing
         return None, False
+
+
+def _mp_service_oid(app_id: str) -> str | None:
+    """Return midPoint Service OID for app_id from cache (refresh if stale)."""
+    _mp_app_roles()  # populate cache
+    return _mp_cache["service_oids"].get(app_id)
+
+
+def _mp_create_service(app_id: str, name: str, description: str, roles: list) -> str | None:
+    """Create midPoint Service object. Returns OID on success, None on failure."""
+    try:
+        r = requests.post(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/services",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json={
+                "name":        app_id,
+                "displayName": name or app_id,
+                "description": description or "",
+                "subtype":     roles,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        location = r.headers.get("Location", "")
+        oid = location.rstrip("/").split("/")[-1] if location else None
+        _mp_invalidate()
+        return oid
+    except Exception:
+        return None
+
+
+def _mp_update_service_roles(app_id: str, roles: list) -> bool:
+    """Replace Service subtype list in midPoint via PUT. Returns True on success."""
+    oid = _mp_service_oid(app_id)
+    if not oid:
+        # Fall back to DB-stored OID
+        conn = get_db()
+        row  = qone(conn, "SELECT mp_oid, name, description FROM apps WHERE app_id = %s", (app_id,))
+        conn.close()
+        if row:
+            oid = row.get("mp_oid") or ""
+    if not oid:
+        return False
+    try:
+        conn = get_db()
+        row  = qone(conn, "SELECT name, description FROM apps WHERE app_id = %s", (app_id,))
+        conn.close()
+        r = requests.put(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/services/{oid}",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Content-Type": "application/json"},
+            json={
+                "oid":         oid,
+                "name":        app_id,
+                "displayName": row["name"] if row else app_id,
+                "description": (row["description"] if row else "") or "",
+                "subtype":     roles,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        _mp_invalidate()
+        return True
+    except Exception:
+        return False
+
+
+def _mp_delete_service(app_id: str) -> bool:
+    """Delete midPoint Service object. Returns True on success or not-found."""
+    oid = _mp_service_oid(app_id)
+    if not oid:
+        conn = get_db()
+        row  = qone(conn, "SELECT mp_oid FROM apps WHERE app_id = %s", (app_id,))
+        conn.close()
+        oid = (row.get("mp_oid") or "") if row else ""
+    if not oid:
+        return True  # nothing to delete
+    try:
+        r = requests.delete(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/services/{oid}",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            timeout=10,
+        )
+        if r.status_code in (200, 204, 404):
+            _mp_invalidate()
+            return True
+        r.raise_for_status()
+        return True
+    except Exception:
+        return False
 
 
 # ── Database helpers ──────────────────────────────────────────────────────────
@@ -330,9 +432,11 @@ def init_db():
             name         TEXT NOT NULL,
             upstream_url TEXT DEFAULT '',
             description  TEXT DEFAULT '',
+            mp_oid       TEXT DEFAULT '',
             added_by     TEXT DEFAULT 'system',
             added_at     TEXT NOT NULL
         )""",
+        "ALTER TABLE apps ADD COLUMN IF NOT EXISTS mp_oid TEXT DEFAULT ''",
         """CREATE TABLE IF NOT EXISTS app_roles (
             app_id TEXT NOT NULL REFERENCES apps(app_id) ON DELETE CASCADE,
             role   TEXT NOT NULL,
@@ -991,11 +1095,18 @@ def apps_add():
     conn = get_db()
     try:
         execute(conn,
-            "INSERT INTO apps (app_id, name, upstream_url, description, added_by, added_at) "
-            "VALUES (%s, %s, %s, %s, 'admin', %s)",
+            "INSERT INTO apps (app_id, name, upstream_url, description, mp_oid, added_by, added_at) "
+            "VALUES (%s, %s, %s, %s, '', 'admin', %s)",
             (app_id, name, url, desc, datetime.utcnow().isoformat()))
         conn.commit()
-        flash(f"App '{app_id}' registered. Add its allowed roles in midPoint → Services.", "success")
+        # Create Service in midPoint (best effort)
+        mp_oid = _mp_create_service(app_id, name, desc, [])
+        if mp_oid:
+            execute(conn, "UPDATE apps SET mp_oid = %s WHERE app_id = %s", (mp_oid, app_id))
+            conn.commit()
+            flash(f"App '{app_id}' registered and created in midPoint ✓ — set allowed roles below.", "success")
+        else:
+            flash(f"App '{app_id}' registered in DB — midPoint unreachable, Service not created.", "warning")
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
         flash(f"App ID '{app_id}' already exists", "warning")
@@ -1007,20 +1118,23 @@ def apps_add():
 @app.post("/apps/remove/<app_id>")
 @login_required
 def apps_remove(app_id):
-    conn = get_db()
+    # Delete from midPoint first (best effort — before DB row gone)
+    mp_ok = _mp_delete_service(app_id)
+    conn  = get_db()
     execute(conn, "DELETE FROM apps WHERE app_id = %s", (app_id,))
     conn.commit()
     conn.close()
-    flash(f"App '{app_id}' removed from registry. Also delete Service in midPoint if needed.", "success")
+    suffix = "— removed from midPoint ✓" if mp_ok else "— midPoint Service may still exist, delete manually."
+    flash(f"App '{app_id}' removed {suffix}", "success" if mp_ok else "warning")
     return redirect(url_for("apps_list"))
 
 
 @app.post("/apps/<app_id>/roles/save")
 @login_required
 def apps_roles_save(app_id):
-    """DB-only fallback — only effective when midPoint is unreachable."""
     selected = [r for r in ROLES if request.form.get(f"role__{r}")]
-    conn     = get_db()
+    # Always write to DB (source of truth for fallback)
+    conn = get_db()
     execute(conn, "DELETE FROM app_roles WHERE app_id = %s", (app_id,))
     if selected:
         executemany(conn, "INSERT INTO app_roles (app_id, role) VALUES (%s, %s)",
@@ -1028,7 +1142,12 @@ def apps_roles_save(app_id):
     conn.commit()
     conn.close()
     sync_to_opa()
-    flash(f"Roles saved to DB for '{app_id}' (DB fallback — midPoint takes priority when available)", "warning")
+    # Write-through to midPoint
+    mp_ok = _mp_update_service_roles(app_id, selected)
+    if mp_ok:
+        flash(f"Roles saved for '{app_id}' — synced to midPoint ✓ OPA reloads within 60s.", "success")
+    else:
+        flash(f"Roles saved to DB for '{app_id}' — midPoint sync failed (OPA uses DB fallback).", "warning")
     return redirect(url_for("apps_list"))
 
 
