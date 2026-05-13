@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Activities – Data Masking Admin{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h4 class="fw-bold mb-0">&#128203; Activity Catalog</h4>
+    <p class="text-muted small mb-0">
+      Map <strong>role + activity → visible fields</strong>.
+      When <code>X-Purpose</code> matches an activity, declared grants override role-baseline masking.
+      Use <a href="/rules">Dynamic Rules</a> with a purpose condition to <em>add</em> masking for an activity.
+    </p>
+  </div>
+</div>
+
+{% if activities %}
+{% for act in activities %}
+{% set act_grants = grants.get(act.activity_id, {}) %}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <div>
+      <span class="fw-bold">{{ act.label }}</span>
+      <code class="ms-2 text-muted small">{{ act.activity_id }}</code>
+      {% if act.description %}
+      <span class="ms-2 text-muted small">— {{ act.description }}</span>
+      {% endif %}
+    </div>
+    <form method="post" action="/activities/{{ act.activity_id }}/delete"
+          onsubmit="return confirm('Delete activity {{ act.activity_id }}?')">
+      <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+    </form>
+  </div>
+  <div class="card-body">
+    <p class="small text-muted mb-2">
+      Check fields each role may <strong>see</strong> when declaring this activity via <code>X-Purpose: {{ act.activity_id }}</code>.
+      Empty row = role's baseline masking applies unchanged.
+    </p>
+    <form method="post" action="/activities/{{ act.activity_id }}/grants/save">
+      <div class="table-responsive">
+        <table class="table table-sm table-bordered align-middle" style="font-size:.8rem">
+          <thead class="table-light">
+            <tr>
+              <th style="min-width:130px">Role</th>
+              {% for f, cls in all_fields %}
+              <th class="text-center" title="{{ cls }}">
+                {{ f }}<br>
+                <span class="badge" style="font-size:.6em;background:{% if cls=='L1' %}#dc3545{% else %}#fd7e14{% endif %}">{{ cls }}</span>
+              </th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for role in all_roles %}
+            {% set role_grants = act_grants.get(role, []) %}
+            <tr>
+              <td class="fw-semibold">{{ role }}</td>
+              {% for f, cls in all_fields %}
+              <td class="text-center">
+                <input class="form-check-input" type="checkbox"
+                       name="grant__{{ role }}__{{ f }}"
+                       {% if f in role_grants %}checked{% endif %}>
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-2">
+        <span class="small text-muted">
+          {{ act_grants.values() | map('length') | sum }} grant(s) across
+          {{ act_grants | length }} role(s)
+        </span>
+        <button class="btn btn-sm btn-dark" type="submit">Save Grants &amp; Sync</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body text-muted text-center py-5">
+    <div style="font-size:2.5rem;opacity:.2">&#128203;</div>
+    <div class="small mt-2">No activities defined yet. Add one below.</div>
+  </div>
+</div>
+{% endif %}
+
+<!-- Add activity form -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header fw-bold">+ Add Activity</div>
+  <div class="card-body">
+    <form method="post" action="/activities/add" class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label fw-semibold small">Activity ID <span class="text-danger">*</span></label>
+        <input class="form-control form-control-sm" name="activity_id" required
+               placeholder="e.g. fraud_investigation">
+        <div class="form-text">Matches <code>X-Purpose</code> header value (lowercase, underscores)</div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Label <span class="text-danger">*</span></label>
+        <input class="form-control form-control-sm" name="label" required
+               placeholder="e.g. Fraud Investigation">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Description</label>
+        <input class="form-control form-control-sm" name="description"
+               placeholder="When agents use this activity">
+      </div>
+      <div class="col-md-1 d-flex align-items-end">
+        <button class="btn btn-dark btn-sm w-100" type="submit">Add</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="alert alert-secondary mt-3 small">
+  <strong>How it works:</strong>
+  Kong forwards <code>X-Purpose</code> as <code>input.ctx.purpose</code> to OPA.
+  When a declared activity matches, fields granted here are removed from the masked set —
+  the agent sees them regardless of the role-baseline mask.
+  Precedence: <strong>activity grants</strong> override role baseline; dynamic-rule <strong>unmask</strong> also overrides; <strong>unmask token</strong> overrides all.
+</div>
+
+{% endblock %}

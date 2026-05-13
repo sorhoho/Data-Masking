@@ -66,6 +66,11 @@ purpose_overrides := data.masking_config.purpose_overrides if {
 }
 default purpose_overrides := {}
 
+activity_policies := data.masking_config.activity_policies if {
+    data.masking_config.activity_policies
+}
+default activity_policies := {}
+
 masking_rules := data.masking_config.masking_rules if {
     data.masking_config.masking_rules
 }
@@ -305,10 +310,17 @@ _purpose_exempt contains f if {
     f := exempt_fields[_]
 }
 
+# Activity-driven field grants: role→activity→field visibility
+_activity_unmasked contains f if {
+    _purpose != ""
+    f := activity_policies[_purpose][input.role][_]
+}
+
 _effective_masked contains f if {
     _role_masked[f]
     not _token_unmasked[f]
     not _purpose_exempt[f]
+    not _activity_unmasked[f]
     not _dynrule_unmasked[f]
 }
 
@@ -316,6 +328,7 @@ _effective_masked contains f if {
     _ctx_extra[f]
     not _token_unmasked[f]
     not _purpose_exempt[f]
+    not _activity_unmasked[f]
     not _dynrule_unmasked[f]
 }
 
@@ -323,6 +336,7 @@ _effective_masked contains f if {
     _dynrule_masked[f]
     not _token_unmasked[f]
     not _purpose_exempt[f]
+    not _activity_unmasked[f]
     not _dynrule_unmasked[f]
 }
 

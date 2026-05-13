@@ -294,6 +294,19 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT '',
             UNIQUE(role, purpose, field)
         )""",
+        """CREATE TABLE IF NOT EXISTS activities (
+            activity_id TEXT PRIMARY KEY,
+            label       TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            created_at  TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS activity_field_policy (
+            id          SERIAL PRIMARY KEY,
+            activity_id TEXT NOT NULL REFERENCES activities(activity_id) ON DELETE CASCADE,
+            role        TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            UNIQUE (activity_id, role, field)
+        )""",
         """CREATE TABLE IF NOT EXISTS masking_rules (
             id                         SERIAL PRIMARY KEY,
             name                       TEXT    NOT NULL,
@@ -408,6 +421,10 @@ def get_config():
     purpose_rows  = qrows(conn,
         "SELECT role, purpose, field FROM purpose_policies ORDER BY role, purpose, field"
     )
+    activity_rows = qrows(conn,
+        "SELECT p.activity_id, p.role, p.field "
+        "FROM activity_field_policy p ORDER BY p.activity_id, p.role, p.field"
+    )
     rule_rows     = qrows(conn,
         "SELECT id, name, priority, condition_roles, condition_tiers, condition_purposes, "
         "condition_channels, condition_apps, condition_in_working_hours, action, fields, enabled "
@@ -440,6 +457,11 @@ def get_config():
     for row in purpose_rows:
         purpose_overrides.setdefault(row["role"], {}).setdefault(row["purpose"], []).append(row["field"])
 
+    # activity_policies: {activity_id: {role: [fields]}} — unmask grants
+    activity_policies: dict = {}
+    for row in activity_rows:
+        activity_policies.setdefault(row["activity_id"], {}).setdefault(row["role"], []).append(row["field"])
+
     masking_rules = []
     for row in rule_rows:
         masking_rules.append({
@@ -463,6 +485,7 @@ def get_config():
         "backends":           backends,
         "app_roles":          app_roles,
         "purpose_overrides":  purpose_overrides,
+        "activity_policies":  activity_policies,
         "masking_rules":      masking_rules,
     }
 
@@ -832,6 +855,87 @@ def purpose_policy_delete():
     conn.close()
     flash(f"Removed: {role} + {purpose} → {field}", "success")
     return redirect(url_for("purpose_policies_list"))
+
+
+# ── Activity catalog + role×field grants ─────────────────────────────────────
+
+@app.get("/activities")
+@login_required
+def activities_list():
+    conn = get_db()
+    acts   = qrows(conn, "SELECT * FROM activities ORDER BY activity_id")
+    policy = qrows(conn,
+        "SELECT activity_id, role, field FROM activity_field_policy ORDER BY activity_id, role, field")
+    conn.close()
+    # Build {activity_id: {role: [fields]}} for template
+    grants: dict = {}
+    for row in policy:
+        grants.setdefault(row["activity_id"], {}).setdefault(row["role"], []).append(row["field"])
+    return render_template("activities.html",
+                           activities=acts, grants=grants,
+                           all_roles=ROLES, all_fields=FIELDS)
+
+
+@app.post("/activities/add")
+@login_required
+def activities_add():
+    activity_id = (request.form.get("activity_id") or "").strip().lower().replace(" ", "_")
+    label       = (request.form.get("label") or "").strip()
+    description = (request.form.get("description") or "").strip()
+    if not activity_id or not label:
+        flash("Activity ID and label are required", "danger")
+        return redirect(url_for("activities_list"))
+    conn = get_db()
+    try:
+        execute(conn,
+            "INSERT INTO activities (activity_id, label, description, created_at) VALUES (%s,%s,%s,%s)",
+            (activity_id, label, description, datetime.utcnow().isoformat()))
+        conn.commit()
+        flash(f"Activity '{activity_id}' created", "success")
+    except Exception as exc:
+        conn.rollback()
+        flash(f"Error: {exc}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for("activities_list"))
+
+
+@app.post("/activities/<activity_id>/delete")
+@login_required
+def activities_delete(activity_id):
+    conn = get_db()
+    execute(conn, "DELETE FROM activities WHERE activity_id = %s", (activity_id,))
+    conn.commit()
+    conn.close()
+    flash(f"Activity '{activity_id}' deleted", "success")
+    return redirect(url_for("activities_list"))
+
+
+@app.post("/activities/<activity_id>/grants/save")
+@login_required
+def activities_grants_save(activity_id):
+    """Save role×field grants for one activity (full replace)."""
+    # Form checkboxes: name="grant__<role>__<field>"
+    new_grants: list = []
+    for key in request.form:
+        if key.startswith("grant__"):
+            _, role, field = key.split("__", 2)
+            new_grants.append((activity_id, role, field))
+    conn = get_db()
+    try:
+        execute(conn, "DELETE FROM activity_field_policy WHERE activity_id = %s", (activity_id,))
+        if new_grants:
+            executemany(conn,
+                "INSERT INTO activity_field_policy (activity_id, role, field) VALUES (%s,%s,%s)",
+                new_grants)
+        conn.commit()
+        flash(f"Grants for '{activity_id}' saved — OPA will reload within 60s", "success")
+    except Exception as exc:
+        conn.rollback()
+        flash(f"Error: {exc}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for("activities_list"))
 
 
 # ── Masking simulation ────────────────────────────────────────────────────────

@@ -126,6 +126,17 @@ OPA helpers: `_roles_match`, `_tiers_match`, `_purposes_match`, `_channels_match
 
 Admin UI at `/rules`. DB column `condition_apps` added via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on startup (safe for existing installs).
 
+### Activity Catalog (Role → Activity → Field)
+Implements business-proposed role×activity→data-field mapping. Activities are named business operations (e.g. `fraud_investigation`, `billing_dispute`) that grant additional field visibility beyond the role baseline.
+
+- DB: `activities` (catalog: activity_id, label, description) + `activity_field_policy` (activity_id × role × field)
+- Bundle: `activity_policies: {activity_id: {role: [fields]}}` — unmask grants
+- OPA: `_activity_unmasked` rule — when `input.ctx.purpose` matches an activity AND role has grants, those fields are removed from masked set
+- Precedence: activity grants < dynamic-rule unmask < unmask token (all three can lift masking; role baseline + dynamic-rule mask can add masking)
+- Admin UI at `/activities` — matrix view: rows=roles, columns=fields, checkbox per cell
+- Additive with `purpose_policies`: both contribute to `_effective_masked` via separate OPA rules
+- For MASK-on-activity (restrict for specific activity): use dynamic rules with `condition_purposes`
+
 ### Admin-service DB Tables
 | Table | Purpose |
 |-------|---------|
@@ -135,7 +146,9 @@ Admin UI at `/rules`. DB column `condition_apps` added via `ALTER TABLE ... ADD 
 | `field_mappings` | backend field → canonical field alias mapping |
 | `apps` | registered applications (id, name, upstream_url) |
 | `app_roles` | app_id × role — which roles may access each app |
-| `purpose_policies` | role × purpose × field — field exemptions by purpose |
+| `purpose_policies` | role × purpose × field — field exemptions by purpose (legacy; prefer activities) |
+| `activities` | activity catalog: activity_id, label, description |
+| `activity_field_policy` | activity_id × role × field — unmask grants per activity |
 | `masking_rules` | dynamic rules: priority, conditions (roles/tiers/purposes/channels/apps/hours), action, fields |
 | `sync_log` | audit trail of OPA bundle sync events |
 
