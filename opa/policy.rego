@@ -255,6 +255,9 @@ _purposes_match(purposes) if { _purpose in purposes }
 _channels_match(channels) if { count(channels) == 0 }
 _channels_match(channels) if { _channel in channels }
 
+_apps_match(apps) if { count(apps) == 0 }
+_apps_match(apps) if { input.app_id in apps }
+
 _wh_matches(rule) if { not is_boolean(rule.condition_in_working_hours) }
 _wh_matches(rule) if {
     is_boolean(rule.condition_in_working_hours)
@@ -267,6 +270,7 @@ _rule_matches(rule) if {
     _tiers_match(rule.condition_tiers)
     _purposes_match(rule.condition_purposes)
     _channels_match(rule.condition_channels)
+    _apps_match(rule.condition_apps)
     _wh_matches(rule)
 }
 

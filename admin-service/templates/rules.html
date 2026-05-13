@@ -6,7 +6,7 @@
   <div>
     <h4 class="fw-bold mb-0">&#9889; Dynamic Rule Engine</h4>
     <p class="text-muted small mb-0">
-      Rules combine role + tier + purpose + channel → mask/unmask fields.
+      Rules combine role + tier + purpose + channel + <strong>app</strong> → mask/unmask fields.
       Applied on top of the role-field matrix. <strong>unmask</strong> overrides <strong>mask</strong> when both match.
     </p>
   </div>
@@ -72,6 +72,14 @@
               {% endfor %}
             </div>
             {% endif %}
+            {% if r.condition_apps %}
+            <div class="mb-1">
+              <span class="text-muted me-1">apps:</span>
+              {% for a in r.condition_apps %}
+              <span class="badge bg-secondary me-1" style="font-size:.68em">{{ a }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
             {% if r.condition_in_working_hours is not none %}
             <div>
               <span class="text-muted me-1">in-hours:</span>
@@ -81,7 +89,8 @@
             </div>
             {% endif %}
             {% if not r.condition_roles and not r.condition_tiers and not r.condition_purposes
-                  and not r.condition_channels and r.condition_in_working_hours is none %}
+                  and not r.condition_channels and not r.condition_apps
+                  and r.condition_in_working_hours is none %}
             <span class="text-muted fst-italic">any context</span>
             {% endif %}
           </td>
@@ -187,7 +196,7 @@
           </select>
         </div>
 
-        <!-- Channels + working hours -->
+        <!-- Channels + Apps + working hours -->
         <div class="col-md-3">
           <label class="form-label fw-semibold small">Channels</label>
           <select class="form-select form-select-sm" name="condition_channels" multiple size="4">
@@ -195,6 +204,14 @@
             <option value="{{ ch }}">{{ ch }}</option>
             {% endfor %}
           </select>
+          <div class="mt-3">
+            <label class="form-label fw-semibold small">Applications <span class="text-muted fw-normal">(Keycloak client_id)</span></label>
+            <select class="form-select form-select-sm" name="condition_apps" multiple size="4">
+              {% for app_id, app_name in all_apps %}
+              <option value="{{ app_id }}" title="{{ app_id }}">{{ app_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
           <div class="mt-3">
             <label class="form-label fw-semibold small">Working Hours</label>
             <div>

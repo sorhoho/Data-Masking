@@ -302,12 +302,14 @@ def init_db():
             condition_tiers            TEXT[]  NOT NULL DEFAULT '{}',
             condition_purposes         TEXT[]  NOT NULL DEFAULT '{}',
             condition_channels         TEXT[]  NOT NULL DEFAULT '{}',
+            condition_apps             TEXT[]  NOT NULL DEFAULT '{}',
             condition_in_working_hours BOOLEAN,
             action                     TEXT    NOT NULL CHECK (action IN ('mask','unmask')),
             fields                     TEXT[]  NOT NULL DEFAULT '{}',
             enabled                    BOOLEAN NOT NULL DEFAULT true,
             created_at                 TEXT    NOT NULL
         )""",
+        "ALTER TABLE masking_rules ADD COLUMN IF NOT EXISTS condition_apps TEXT[] NOT NULL DEFAULT '{}'",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -408,7 +410,7 @@ def get_config():
     )
     rule_rows     = qrows(conn,
         "SELECT id, name, priority, condition_roles, condition_tiers, condition_purposes, "
-        "condition_channels, condition_in_working_hours, action, fields, enabled "
+        "condition_channels, condition_apps, condition_in_working_hours, action, fields, enabled "
         "FROM masking_rules ORDER BY priority, id"
     )
     conn.close()
@@ -448,6 +450,7 @@ def get_config():
             "condition_tiers":            list(row["condition_tiers"] or []),
             "condition_purposes":         list(row["condition_purposes"] or []),
             "condition_channels":         list(row["condition_channels"] or []),
+            "condition_apps":             list(row["condition_apps"] or []),
             "condition_in_working_hours": row["condition_in_working_hours"],
             "action":                     row["action"],
             "fields":                     list(row["fields"] or []),
@@ -977,10 +980,12 @@ def api_apps_list():
 def rules_list():
     conn = get_db()
     rules = qrows(conn, "SELECT * FROM masking_rules ORDER BY priority, id")
+    apps  = qrows(conn, "SELECT app_id, name FROM apps ORDER BY app_id")
     conn.close()
     return render_template("rules.html", rules=rules,
                            all_roles=ROLES, all_purposes=PURPOSES,
-                           all_fields=FIELDS, tiers=TIERS, channels=CHANNELS)
+                           all_fields=FIELDS, tiers=TIERS, channels=CHANNELS,
+                           all_apps=[(a["app_id"], a["name"]) for a in apps])
 
 
 @app.post("/rules/add")
@@ -993,6 +998,7 @@ def rules_add():
     tiers     = request.form.getlist("condition_tiers")
     purposes  = request.form.getlist("condition_purposes")
     channels  = request.form.getlist("condition_channels")
+    apps_cond = request.form.getlist("condition_apps")
     wh_val    = request.form.get("condition_in_working_hours", "any")
     wh        = None if wh_val == "any" else (wh_val == "true")
     fields    = request.form.getlist("fields")
@@ -1006,9 +1012,10 @@ def rules_add():
         execute(conn,
             """INSERT INTO masking_rules
                (name, priority, condition_roles, condition_tiers, condition_purposes,
-                condition_channels, condition_in_working_hours, action, fields, enabled, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
-            (name, priority, roles, tiers, purposes, channels, wh, action, fields,
+                condition_channels, condition_apps, condition_in_working_hours,
+                action, fields, enabled, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)""",
+            (name, priority, roles, tiers, purposes, channels, apps_cond, wh, action, fields,
              datetime.utcnow().isoformat()))
         conn.commit()
         flash(f"Rule '{name}' added — OPA will reload within 60s", "success")
