@@ -222,7 +222,16 @@ def app_callback(app_key):
     apps = get_apps()
     if app_key not in apps:
         return "Unknown app", 404
-    token        = _oa(app_key).authorize_access_token()
+    oa = _oa(app_key)
+    try:
+        token = oa.authorize_access_token()
+    except Exception:
+        # parse_id_token may fail (nonce/at_hash mismatch, key issues).
+        # fetch_access_token already ran and stored the token in g before
+        # the ID-token validation step — retrieve it from there.
+        token = oa.token or {}
+        if not token or "access_token" not in token:
+            return redirect(url_for("app_login", app_key=app_key))
     access_token = token["access_token"]
     ui_resp = requests.get(
         f"{KEYCLOAK_INTERNAL_URL}/realms/{REALM}/protocol/openid-connect/userinfo",
