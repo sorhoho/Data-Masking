@@ -33,7 +33,8 @@ UNMASK_REASON_CODES = ["FRAUD_INVESTIGATION", "COMPLIANCE_AUDIT", "LEGAL_HOLD",
 MIDPOINT_URL        = os.environ.get("MIDPOINT_URL",        "http://midpoint:8080")
 MIDPOINT_ADMIN_USER = os.environ.get("MIDPOINT_ADMIN_USER", "administrator")
 MIDPOINT_ADMIN_PASS = os.environ.get("MIDPOINT_ADMIN_PASS", "Admin123!")
-MP_CACHE_TTL        = 300  # seconds
+MP_CACHE_TTL        = 300   # seconds — app-roles cache
+MP_USER_CACHE_TTL   = 120   # seconds — user-roles cache (shorter, more dynamic)
 
 # Ordered list of (field, classification) — drives both DB and UI
 FIELDS = [
@@ -343,6 +344,144 @@ def _mp_delete_service(app_id: str) -> bool:
             _mp_invalidate()
             return True
         r.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+# ── midPoint: user role assignments (authoritative for /users page) ───────────
+
+_mp_user_cache: dict = {"roles": None, "user_oids": {}, "fetched_at": 0.0}
+
+
+def _mp_invalidate_users():
+    _mp_user_cache["roles"]     = None
+    _mp_user_cache["user_oids"] = {}
+    _mp_user_cache["fetched_at"] = 0.0
+
+
+def _mp_roles_map() -> dict:
+    """Fetch all midPoint RoleType objects. Returns {role_name: oid}."""
+    try:
+        r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=5,
+        )
+        r.raise_for_status()
+        raw = r.json().get("object", {}).get("object", [])
+        if isinstance(raw, dict):
+            raw = [raw]
+        result = {}
+        for role in raw:
+            name = role.get("name", "")
+            if isinstance(name, dict):
+                name = name.get("orig", "")
+            oid = role.get("oid", "")
+            if name and oid:
+                result[name] = oid
+        return result
+    except Exception:
+        return {}
+
+
+def _mp_user_roles():
+    """Fetch user→[role_names] from midPoint UserType assignment refs.
+    Returns ({username: [roles]}, {username: oid}, from_midpoint)."""
+    now = time.time()
+    if (_mp_user_cache["roles"] is not None
+            and now - _mp_user_cache["fetched_at"] < MP_USER_CACHE_TTL):
+        return _mp_user_cache["roles"], _mp_user_cache["user_oids"], True
+    try:
+        roles_by_name = _mp_roles_map()
+        oid_to_name   = {v: k for k, v in roles_by_name.items()}
+        r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/users",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        raw = r.json().get("object", {}).get("object", [])
+        if isinstance(raw, dict):
+            raw = [raw]
+        user_roles = {}
+        user_oids  = {}
+        for user in raw:
+            uname = user.get("name", "")
+            if isinstance(uname, dict):
+                uname = uname.get("orig", "")
+            if not uname:
+                continue
+            oid = user.get("oid", "")
+            assignments = user.get("assignment", [])
+            if isinstance(assignments, dict):
+                assignments = [assignments]
+            roles = []
+            for asgn in (assignments or []):
+                ref      = asgn.get("targetRef", {})
+                ref_type = ref.get("type", "")
+                ref_oid  = ref.get("oid", "")
+                if "RoleType" in ref_type and ref_oid:
+                    role_name = oid_to_name.get(ref_oid)
+                    if role_name:
+                        roles.append(role_name)
+            user_roles[uname] = roles
+            if oid:
+                user_oids[uname] = oid
+        _mp_user_cache["roles"]     = user_roles
+        _mp_user_cache["user_oids"] = user_oids
+        _mp_user_cache["fetched_at"] = now
+        return user_roles, user_oids, True
+    except Exception:
+        if _mp_user_cache["roles"] is not None:
+            return _mp_user_cache["roles"], _mp_user_cache["user_oids"], True
+        return None, {}, False
+
+
+def _mp_save_user_roles(username: str, selected_roles: list) -> bool:
+    """Write user role assignments back to midPoint (best-effort governance record).
+    Preserves non-RoleType assignments (org memberships, etc.). Returns True on success."""
+    _, user_oids, mp_ok = _mp_user_roles()
+    if not mp_ok:
+        return False
+    user_oid = user_oids.get(username)
+    if not user_oid:
+        return False  # user not yet provisioned in midPoint
+    roles_map = _mp_roles_map()  # name → oid
+    try:
+        # Fetch full user object to preserve non-role assignments
+        get_r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/users/{user_oid}",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=5,
+        )
+        get_r.raise_for_status()
+        user_obj = get_r.json().get("object", {})
+        existing = user_obj.get("assignment", [])
+        if isinstance(existing, dict):
+            existing = [existing]
+        # Keep non-RoleType assignments (org, service, etc.)
+        kept = [a for a in (existing or [])
+                if "RoleType" not in a.get("targetRef", {}).get("type", "")]
+        new_role_asgns = [
+            {"targetRef": {"oid": roles_map[r], "type": "RoleType"}}
+            for r in selected_roles if r in roles_map
+        ]
+        user_obj["assignment"] = kept + new_role_asgns
+        # Remove version to avoid optimistic-lock conflicts on PUT
+        user_obj.pop("version", None)
+        put_r = requests.put(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/users/{user_oid}",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Content-Type": "application/json"},
+            json=user_obj,
+            timeout=10,
+        )
+        put_r.raise_for_status()
+        _mp_invalidate_users()
         return True
     except Exception:
         return False
@@ -1254,6 +1393,9 @@ def _kc_token():
 
 
 def _kc_users_with_roles():
+    """Fetch users from Keycloak; overlay role state from midPoint (authoritative).
+    Falls back to Keycloak role-mappings when midPoint is unavailable.
+    Returns (users_list, mp_available)."""
     token   = _kc_token()
     headers = {"Authorization": f"Bearer {token}"}
     users   = requests.get(
@@ -1262,15 +1404,26 @@ def _kc_users_with_roles():
     )
     users.raise_for_status()
     result = users.json()
+
+    # Try midPoint as authoritative role source
+    mp_roles, _, mp_ok = _mp_user_roles()
+
     for u in result:
-        roles = requests.get(
-            f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
-            f"/users/{u['id']}/role-mappings/realm",
-            headers=headers, timeout=10,
-        ).json()
-        u["app_roles"] = [r["name"] for r in roles
-                          if not r["name"].startswith("default-roles")]
-    return result
+        uname = u.get("username", "")
+        if mp_ok and mp_roles is not None and uname in mp_roles:
+            u["app_roles"]   = mp_roles[uname]
+            u["role_source"] = "midpoint"
+        else:
+            # Fall back to Keycloak role-mappings API
+            kc_roles = requests.get(
+                f"{KEYCLOAK_INTERNAL_URL}/admin/realms/{KEYCLOAK_REALM}"
+                f"/users/{u['id']}/role-mappings/realm",
+                headers=headers, timeout=10,
+            ).json()
+            u["app_roles"]   = [r["name"] for r in kc_roles
+                                if not r["name"].startswith("default-roles")]
+            u["role_source"] = "keycloak"
+    return result, (mp_ok and mp_roles is not None)
 
 
 def _kc_role_obj(token, role_name):
@@ -1288,11 +1441,12 @@ def _kc_role_obj(token, role_name):
 @login_required
 def users_list():
     try:
-        users = _kc_users_with_roles()
+        users, mp_available = _kc_users_with_roles()
         error = None
     except Exception as exc:
-        users, error = [], str(exc)
-    return render_template("users.html", users=users, roles=ROLES, error=error)
+        users, mp_available, error = [], False, str(exc)
+    return render_template("users.html", users=users, roles=ROLES,
+                           error=error, mp_available=mp_available)
 
 
 @app.post("/users/add")
@@ -1362,7 +1516,14 @@ def users_roles_save(user_id):
                 f"/users/{user_id}/role-mappings/realm",
                 headers=headers, json=role_objs, timeout=10,
             )
-        flash(f"Roles saved for '{username}'", "success")
+        # Best-effort: sync role state to midPoint governance record
+        mp_synced = _mp_save_user_roles(username, selected)
+        msg = f"Roles saved for '{username}'"
+        if mp_synced:
+            msg += " (synced to midPoint)"
+        else:
+            msg += " (midPoint sync skipped — user not in midPoint or MP unavailable)"
+        flash(msg, "success")
     except Exception as exc:
         flash(f"Error: {exc}", "danger")
     return redirect(url_for("users_list"))

@@ -13,6 +13,14 @@
 </div>
 {% endif %}
 
+{% if not mp_available %}
+<div class="alert alert-warning alert-dismissible fade show py-2 small" role="alert">
+  <strong>&#128683; midPoint unavailable</strong> — role state shown from Keycloak fallback.
+  Roles may not reflect midPoint governance records.
+  <button type="button" class="btn-close btn-sm" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
 <div class="row g-4">
 
   {# ── Onboard new user ─────────────────────────────────────────────────────── #}
@@ -62,9 +70,14 @@
 
     <div class="alert alert-secondary mt-3 small">
       <strong>Lifecycle actions:</strong>
-      Users are created directly in Keycloak with a temporary password.
-      Offboarding disables the account and immediately invalidates all active tokens —
-      the user cannot authenticate until re-enabled.
+      Users are created in Keycloak with a temporary password.
+      Offboarding disables the account and immediately invalidates all active tokens.
+    </div>
+    <div class="alert alert-primary mt-2 small">
+      <strong>&#128737; midPoint IGA:</strong>
+      Role assignments are read from midPoint (authoritative governance record).
+      Saving roles writes to Keycloak for enforcement and syncs back to midPoint.
+      Users not yet provisioned in midPoint show a <span class="badge bg-warning text-dark" style="font-size:.7em">KC</span> fallback badge.
     </div>
   </div>
 
@@ -72,8 +85,17 @@
   <div class="col-lg-8">
     <div class="card border-0 shadow-sm">
       <div class="card-header fw-bold d-flex justify-content-between align-items-center">
-        <span>Keycloak Users <span class="badge bg-dark ms-1">{{ users | length }}</span></span>
-        <small class="text-muted fw-normal">Realm: {{ request.environ.get('KEYCLOAK_REALM', 'demo') }}</small>
+        <span>
+          Users <span class="badge bg-dark ms-1">{{ users | length }}</span>
+          {% if mp_available %}
+          <span class="badge bg-primary ms-2" title="Role state from midPoint IGA">&#128737; midPoint</span>
+          {% else %}
+          <span class="badge bg-secondary ms-2" title="Role state from Keycloak (midPoint unavailable)">Keycloak</span>
+          {% endif %}
+        </span>
+        <small class="text-muted fw-normal">
+          Roles from: {{ 'midPoint IGA (authoritative)' if mp_available else 'Keycloak (fallback)' }}
+        </small>
       </div>
 
       {% if users %}
@@ -111,6 +133,11 @@
                 {% else %}
                   <span class="text-muted small">—</span>
                 {% endfor %}
+                {% if u.role_source == 'midpoint' %}
+                <br><span class="badge bg-primary mt-1" style="font-size:.6em" title="Source: midPoint IGA">MP</span>
+                {% elif u.role_source == 'keycloak' and mp_available %}
+                <br><span class="badge bg-warning text-dark mt-1" style="font-size:.6em" title="Not in midPoint — sourced from Keycloak">KC</span>
+                {% endif %}
               </td>
               <td class="text-end">
                 <button class="btn btn-sm btn-outline-secondary"
@@ -156,7 +183,8 @@
         <input type="hidden" name="username" value="{{ u.username }}" />
         <div class="modal-body">
           <p class="text-muted small mb-3">
-            Select all roles this user should hold. Saving replaces the current role set immediately.
+            Select all roles this user should hold. Saving replaces the current role set in Keycloak
+            {% if mp_available %}and syncs the governance record to midPoint{% endif %}.
           </p>
           <div class="row g-2">
             {% for role in roles %}
