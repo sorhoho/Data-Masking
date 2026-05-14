@@ -497,6 +497,7 @@ def _mp_ensure_roles() -> dict:
                 auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 json={
+                    "@type":       "c:RoleType",
                     "name":        role_name,
                     "displayName": role_name.replace("_", " ").title(),
                     "description": f"Data Masking role: {role_name}",
@@ -1628,11 +1629,11 @@ def midpoint_status():
             f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
             auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
             headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json={"name": "__dm_test__", "displayName": "DM Test"},
+            json={"@type": "c:RoleType", "name": "__dm_test__", "displayName": "DM Test"},
             timeout=5,
         )
         result["post_status"] = pr.status_code
-        result["post_body"]   = pr.text[:300]
+        result["post_body"]   = pr.text[:800]
         if pr.status_code in (200, 201):
             loc = pr.headers.get("Location", "")
             oid = loc.rstrip("/").split("/")[-1]
