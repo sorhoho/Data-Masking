@@ -271,7 +271,7 @@ def _mp_create_service(app_id: str, name: str, description: str, roles: list) ->
             f"{MIDPOINT_URL}/midpoint/ws/rest/services",
             auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
             headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json={"object": {
+            json={"service": {
                 "name":        app_id,
                 "displayName": name or app_id,
                 "description": description or "",
@@ -308,7 +308,7 @@ def _mp_update_service_roles(app_id: str, roles: list) -> bool:
             f"{MIDPOINT_URL}/midpoint/ws/rest/services/{oid}",
             auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
             headers={"Content-Type": "application/json"},
-            json={"object": {
+            json={"service": {
                 "oid":         oid,
                 "name":        app_id,
                 "displayName": row["name"] if row else app_id,
@@ -476,7 +476,7 @@ def _mp_save_user_roles(username: str, selected_roles: list) -> bool:
             f"{MIDPOINT_URL}/midpoint/ws/rest/users/{user_oid}",
             auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
             headers={"Content-Type": "application/json"},
-            json={"object": user_obj},
+            json={"user": user_obj},
             timeout=10,
         )
         put_r.raise_for_status()
@@ -495,7 +495,7 @@ def _mp_ensure_roles() -> dict:
                 f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
                 auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
-                json={"object": {
+                json={"role": {
                     "name":        role_name,
                     "displayName": role_name.replace("_", " ").title(),
                     "description": f"Data Masking role: {role_name}",
@@ -1627,7 +1627,7 @@ def midpoint_status():
             f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
             auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
             headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json={"object": {"name": "__dm_test__", "displayName": "DM Test"}},
+            json={"role": {"name": "__dm_test__", "displayName": "DM Test"}},
             timeout=5,
         )
         result["post_status"] = pr.status_code
