@@ -79,6 +79,20 @@
       Saving roles writes to Keycloak for enforcement and syncs back to midPoint.
       Users not yet provisioned in midPoint show a <span class="badge bg-warning text-dark" style="font-size:.7em">KC</span> fallback badge.
     </div>
+    <div class="card border-0 shadow-sm mt-2">
+      <div class="card-header fw-bold small">&#9881; midPoint Setup</div>
+      <div class="card-body py-2">
+        <p class="small text-muted mb-2">
+          First-time setup: seed midPoint with all custom roles so user assignments can be resolved.
+        </p>
+        <form method="post" action="/midpoint/init-roles"
+              onsubmit="return confirm('Create all custom roles in midPoint? Safe to run multiple times.')">
+          <button class="btn btn-sm btn-outline-primary w-100" type="submit">
+            &#128737; Init midPoint Roles
+          </button>
+        </form>
+      </div>
+    </div>
   </div>
 
   {# ── User table ───────────────────────────────────────────────────────────── #}

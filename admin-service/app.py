@@ -487,6 +487,35 @@ def _mp_save_user_roles(username: str, selected_roles: list) -> bool:
         return False
 
 
+def _mp_ensure_roles() -> dict:
+    """Idempotently create all custom roles in midPoint. Returns {role: status}."""
+    results = {}
+    for role_name in ROLES:
+        try:
+            r = requests.post(
+                f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
+                auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                json={
+                    "name":        role_name,
+                    "displayName": role_name.replace("_", " ").title(),
+                    "description": f"Data Masking role: {role_name}",
+                },
+                timeout=10,
+            )
+            if r.status_code in (200, 201):
+                results[role_name] = "created"
+            elif r.status_code == 409:
+                results[role_name] = "exists"
+            else:
+                results[role_name] = f"error:{r.status_code}"
+        except Exception as exc:
+            results[role_name] = f"error:{exc}"
+    # invalidate caches so _mp_roles_map picks up new roles
+    _mp_invalidate_users()
+    return results
+
+
 # ── Database helpers ──────────────────────────────────────────────────────────
 
 def get_db():
@@ -1543,6 +1572,21 @@ def users_offboard(user_id):
         flash(f"'{username}' offboarded — account disabled, all sessions revoked", "success")
     except Exception as exc:
         flash(f"Error: {exc}", "danger")
+    return redirect(url_for("users_list"))
+
+
+@app.post("/midpoint/init-roles")
+@login_required
+def midpoint_init_roles():
+    results = _mp_ensure_roles()
+    created = sum(1 for v in results.values() if v == "created")
+    existed = sum(1 for v in results.values() if v == "exists")
+    errors  = {k: v for k, v in results.items() if v.startswith("error")}
+    msg = f"midPoint roles: {created} created, {existed} already existed"
+    if errors:
+        flash(msg + f" — {len(errors)} errors: {list(errors.keys())}", "warning")
+    else:
+        flash(msg, "success")
     return redirect(url_for("users_list"))
 
 
