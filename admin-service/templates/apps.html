@@ -4,10 +4,16 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <h4 class="fw-bold mb-0">&#128196; Application Registry</h4>
-  <a href="http://localhost:8090/midpoint/self/services" target="_blank"
-     class="btn btn-sm btn-outline-secondary">
-    &#9881; Manage roles in midPoint &#8599;
-  </a>
+  <div class="d-flex gap-2">
+    <form method="post" action="/midpoint/init-services"
+          onsubmit="return confirm('Seed all apps to midPoint? Safe to run multiple times.')">
+      <button class="btn btn-sm btn-outline-primary" type="submit">&#128737; Init midPoint Services</button>
+    </form>
+    <a href="http://localhost:8090/midpoint/self/services" target="_blank"
+       class="btn btn-sm btn-outline-secondary">
+      &#9881; Manage in midPoint &#8599;
+    </a>
+  </div>
 </div>
 
 {% if mp_source %}

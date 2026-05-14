@@ -1575,6 +1575,49 @@ def users_offboard(user_id):
     return redirect(url_for("users_list"))
 
 
+@app.post("/midpoint/init-services")
+@login_required
+def midpoint_init_services():
+    """Seed all apps from DB into midPoint as ServiceType objects."""
+    conn = get_db()
+    apps = qrows(conn, "SELECT app_id, name, description FROM apps ORDER BY app_id")
+    conn.close()
+    created, updated, errors = 0, 0, []
+    for app in apps:
+        app_id = app["app_id"]
+        # Fetch current allowed roles from app_roles table
+        conn2 = get_db()
+        role_rows = qrows(conn2, "SELECT role FROM app_roles WHERE app_id = %s", (app_id,))
+        conn2.close()
+        roles = [r["role"] for r in role_rows]
+        existing_oid = _mp_service_oid(app_id)
+        if existing_oid:
+            ok = _mp_update_service_roles(app_id, roles)
+            if ok:
+                updated += 1
+            else:
+                errors.append(f"{app_id}:update_failed")
+        else:
+            oid = _mp_create_service(app_id, app["name"] or app_id,
+                                     app["description"] or "", roles)
+            if oid:
+                # Store OID back to DB
+                conn3 = get_db()
+                with conn3.cursor() as cur:
+                    cur.execute("UPDATE apps SET mp_oid = %s WHERE app_id = %s", (oid, app_id))
+                conn3.commit()
+                conn3.close()
+                created += 1
+            else:
+                errors.append(f"{app_id}:create_failed")
+    msg = f"midPoint services: {created} created, {updated} updated"
+    if errors:
+        flash(msg + f" — errors: {errors}", "warning")
+    else:
+        flash(msg, "success")
+    return redirect(url_for("apps_list"))
+
+
 @app.post("/midpoint/init-roles")
 @login_required
 def midpoint_init_roles():
