@@ -1593,9 +1593,11 @@ def midpoint_init_roles():
 
 
 @app.get("/midpoint/status")
-@login_required
 def midpoint_status():
-    """Diagnostic: test midPoint connectivity and show role counts."""
+    """Diagnostic: test midPoint connectivity. Accepts browser session or X-Api-Key header."""
+    api_key = request.headers.get("X-Api-Key", "")
+    if api_key != GOVERNANCE_API_KEY and not session.get("admin_logged_in"):
+        return jsonify({"error": "unauthorized"}), 401
     result = {"url": MIDPOINT_URL, "user": MIDPOINT_ADMIN_USER}
     try:
         r = requests.get(
