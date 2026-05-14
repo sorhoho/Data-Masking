@@ -16,11 +16,19 @@
   </div>
 </div>
 
+{% if mp_source %}
 <div class="alert alert-info d-flex align-items-center gap-2 py-2 mb-3 small">
   <span>&#128737;</span>
-  <span>Role grants managed here (DB → OPA bundle).
-    Apps are registered in <strong>midPoint</strong> for governance visibility — use <em>Init midPoint Services</em> to sync.</span>
+  <span>Role grants from <strong>midPoint IGA</strong> (role → inducement → service).
+    Changes written to midPoint and propagated to OPA within ~60s.</span>
 </div>
+{% else %}
+<div class="alert alert-warning d-flex align-items-center gap-2 py-2 mb-3 small">
+  <span>&#9888;&#65039;</span>
+  <span>midPoint unreachable — showing <strong>DB fallback</strong>.
+    Run <em>Init midPoint Services</em> after midPoint is reachable to seed inducements.</span>
+</div>
+{% endif %}
 
 <div class="row g-3 mb-4">
   <div class="col-md-4">
@@ -127,7 +135,10 @@
               {% endfor %}
             </div>
             <div class="d-flex justify-content-between align-items-center">
-              <span class="small text-muted">{{ granted | length }} role(s)</span>
+              <span class="small text-muted">
+                {{ granted | length }} role(s)
+                {% if mp_source %}<span class="text-primary ms-1" title="Source: midPoint inducements">&#128737;</span>{% endif %}
+              </span>
               <div class="d-flex gap-2">
                 <a href="http://localhost:8090/midpoint/self/services" target="_blank"
                    class="btn btn-sm btn-outline-secondary">midPoint &#8599;</a>

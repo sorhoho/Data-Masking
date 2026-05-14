@@ -208,11 +208,18 @@ _DEFAULT_APP_ROLES = [
 # ── midPoint app-role cache + write helpers ───────────────────────────────────
 
 _mp_cache: dict = {"service_oids": {}, "fetched_at": 0.0}
+_mp_inducement_cache: dict = {"app_roles": None, "fetched_at": 0.0}
+MP_INDUCEMENT_CACHE_TTL = 120  # seconds
 
 
 def _mp_invalidate():
     _mp_cache["service_oids"] = {}
     _mp_cache["fetched_at"]   = 0.0
+
+
+def _mp_invalidate_inducements():
+    _mp_inducement_cache["app_roles"]   = None
+    _mp_inducement_cache["fetched_at"] = 0.0
 
 
 def _mp_service_oids_refresh():
@@ -330,6 +337,116 @@ def _mp_delete_service(app_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ── midPoint: app-role matrix via role inducements (proper pattern) ──────────
+
+def _mp_app_roles_from_inducements() -> tuple[dict, bool]:
+    """Read app-role matrix from midPoint: RoleType.inducement → ServiceType.
+    Returns ({app_id: [role_names]}, from_midpoint)."""
+    now = time.time()
+    if (_mp_inducement_cache["app_roles"] is not None
+            and now - _mp_inducement_cache["fetched_at"] < MP_INDUCEMENT_CACHE_TTL):
+        return _mp_inducement_cache["app_roles"], True
+    try:
+        # Build service OID → app_id map from cache
+        _mp_service_oids_refresh()
+        svc_oid_to_name = {v: k for k, v in _mp_cache["service_oids"].items()}
+
+        r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        raw = r.json().get("object", {}).get("object", [])
+        if isinstance(raw, dict):
+            raw = [raw]
+
+        result = {}
+        for role in raw:
+            rname = role.get("name", "")
+            if isinstance(rname, dict):
+                rname = rname.get("orig", "")
+            if not rname or rname not in ROLES:
+                continue  # skip midPoint system roles
+            inducements = role.get("inducement", [])
+            if isinstance(inducements, dict):
+                inducements = [inducements]
+            for ind in (inducements or []):
+                ref      = ind.get("targetRef", {})
+                ref_type = ref.get("type", "")
+                ref_oid  = ref.get("oid", "")
+                if "ServiceType" in ref_type and ref_oid in svc_oid_to_name:
+                    result.setdefault(svc_oid_to_name[ref_oid], []).append(rname)
+
+        _mp_inducement_cache["app_roles"]  = result
+        _mp_inducement_cache["fetched_at"] = now
+        return result, True
+    except Exception:
+        if _mp_inducement_cache["app_roles"] is not None:
+            return _mp_inducement_cache["app_roles"], True
+        return {}, False
+
+
+def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bool:
+    """Update midPoint role inducements so each role in selected_roles induces service_oid.
+    Only modifies roles that actually changed. Returns True if all updates succeeded."""
+    roles_map = _mp_roles_map()  # role_name → oid
+
+    # Diff against current midPoint state (minimise API calls)
+    current_map, _ = _mp_app_roles_from_inducements()
+    current = set(current_map.get(app_id, []))
+    target  = set(selected_roles)
+    to_add    = target  - current
+    to_remove = current - target
+    changed   = to_add | to_remove
+
+    if not changed:
+        return True
+
+    success = True
+    for role_name in changed:
+        role_oid = roles_map.get(role_name)
+        if not role_oid:
+            continue
+        try:
+            get_r = requests.get(
+                f"{MIDPOINT_URL}/midpoint/ws/rest/roles/{role_oid}",
+                auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+                headers={"Accept": "application/json"},
+                timeout=5,
+            )
+            get_r.raise_for_status()
+            role_obj = get_r.json().get("object", {})
+            inds = role_obj.get("inducement", [])
+            if isinstance(inds, dict):
+                inds = [inds]
+            inds = list(inds or [])
+
+            if role_name in to_add:
+                inds.append({"targetRef": {"oid": service_oid, "type": "ServiceType"}})
+            else:
+                inds = [i for i in inds
+                        if i.get("targetRef", {}).get("oid") != service_oid]
+
+            role_obj["inducement"] = inds
+            role_obj.pop("version", None)
+
+            put_r = requests.put(
+                f"{MIDPOINT_URL}/midpoint/ws/rest/roles/{role_oid}",
+                auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+                headers={"Content-Type": "application/json"},
+                json={"role": role_obj},
+                timeout=10,
+            )
+            put_r.raise_for_status()
+        except Exception:
+            success = False
+
+    _mp_invalidate_inducements()
+    return success
 
 
 # ── midPoint: user role assignments (authoritative for /users page) ───────────
@@ -754,10 +871,14 @@ def get_config():
             "classification": row["classification"],
         }
 
-    # App roles always from DB (source of truth — midPoint stores service metadata only)
-    app_roles = {}
-    for row in app_role_rows:
-        app_roles.setdefault(row["app_id"], []).append(row["role"])
+    # App roles: midPoint inducements authoritative; DB rows are fallback when MP down
+    mp_app_roles, mp_inducement_ok = _mp_app_roles_from_inducements()
+    if mp_inducement_ok:
+        app_roles = mp_app_roles
+    else:
+        app_roles = {}
+        for row in app_role_rows:
+            app_roles.setdefault(row["app_id"], []).append(row["role"])
 
     purpose_overrides = {}
     for row in purpose_rows:
@@ -1215,13 +1336,22 @@ def simulate():
 @login_required
 def apps_list():
     conn          = get_db()
-    apps     = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
-    rows     = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+    apps = qrows(conn, "SELECT * FROM apps ORDER BY app_id")
     conn.close()
-    app_role_map = {}
-    for r in rows:
-        app_role_map.setdefault(r["app_id"], []).append(r["role"])
-    return render_template("apps.html", apps=apps, app_role_map=app_role_map, roles=ROLES)
+    mp_app_roles, mp_ok = _mp_app_roles_from_inducements()
+    if mp_ok:
+        app_role_map = mp_app_roles
+        mp_source    = True
+    else:
+        conn2 = get_db()
+        rows  = qrows(conn2, "SELECT app_id, role FROM app_roles ORDER BY app_id, role")
+        conn2.close()
+        app_role_map = {}
+        for r in rows:
+            app_role_map.setdefault(r["app_id"], []).append(r["role"])
+        mp_source = False
+    return render_template("apps.html", apps=apps, app_role_map=app_role_map,
+                           roles=ROLES, mp_source=mp_source)
 
 
 @app.post("/apps/add")
@@ -1283,8 +1413,15 @@ def apps_roles_save(app_id):
                     [(app_id, r) for r in selected])
     conn.commit()
     conn.close()
+    # Write inducements to midPoint (authoritative)
+    service_oid = _mp_service_oid(app_id)
+    if service_oid:
+        mp_ok = _mp_set_app_roles(app_id, service_oid, selected)
+        suffix = "midPoint inducements updated, " if mp_ok else "midPoint sync partial — "
+    else:
+        suffix = "app not in midPoint (run Init midPoint Services) — "
     sync_to_opa()
-    flash(f"Roles saved for '{app_id}' — OPA reloads within 60s.", "success")
+    flash(f"Roles saved for '{app_id}' — {suffix}OPA reloads within 60s.", "success" if service_oid else "warning")
     return redirect(url_for("apps_list"))
 
 
@@ -1547,10 +1684,15 @@ def users_offboard(user_id):
 @app.post("/midpoint/init-services")
 @login_required
 def midpoint_init_services():
-    """Seed all apps from DB into midPoint as ServiceType objects (metadata only)."""
+    """Seed all apps into midPoint: create ServiceType + set role inducements from DB."""
     conn = get_db()
-    apps = qrows(conn, "SELECT app_id, name, description FROM apps ORDER BY app_id")
+    apps      = qrows(conn, "SELECT app_id, name, description FROM apps ORDER BY app_id")
+    role_rows = qrows(conn, "SELECT app_id, role FROM app_roles ORDER BY app_id")
     conn.close()
+    db_role_map: dict = {}
+    for r in role_rows:
+        db_role_map.setdefault(r["app_id"], []).append(r["role"])
+
     created, updated, errors = 0, 0, []
     for app in apps:
         app_id = app["app_id"]
@@ -1560,19 +1702,26 @@ def midpoint_init_services():
             if ok:
                 updated += 1
             else:
-                errors.append(f"{app_id}:update_failed")
+                errors.append(f"{app_id}:meta_update_failed")
+            svc_oid = existing_oid
         else:
-            oid = _mp_create_service(app_id, app["name"] or app_id,
-                                     app["description"] or "")
-            if oid:
+            svc_oid = _mp_create_service(app_id, app["name"] or app_id,
+                                         app["description"] or "")
+            if svc_oid:
                 conn3 = get_db()
                 with conn3.cursor() as cur:
-                    cur.execute("UPDATE apps SET mp_oid = %s WHERE app_id = %s", (oid, app_id))
+                    cur.execute("UPDATE apps SET mp_oid = %s WHERE app_id = %s",
+                                (svc_oid, app_id))
                 conn3.commit()
                 conn3.close()
                 created += 1
             else:
                 errors.append(f"{app_id}:create_failed")
+                continue
+        # Seed inducements from DB app_roles
+        roles = db_role_map.get(app_id, [])
+        if not _mp_set_app_roles(app_id, svc_oid, roles):
+            errors.append(f"{app_id}:inducement_partial")
     msg = f"midPoint services: {created} created, {updated} updated"
     if errors:
         flash(msg + f" — errors: {errors}", "warning")
