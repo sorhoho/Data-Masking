@@ -508,9 +508,10 @@ def _mp_ensure_roles() -> dict:
             elif r.status_code == 409:
                 results[role_name] = "exists"
             else:
-                results[role_name] = f"error:{r.status_code}"
+                body = r.text[:200].replace("\n", " ")
+                results[role_name] = f"error:{r.status_code}:{body}"
         except Exception as exc:
-            results[role_name] = f"error:{exc}"
+            results[role_name] = f"error:exc:{exc}"
     # invalidate caches so _mp_roles_map picks up new roles
     _mp_invalidate_users()
     return results
@@ -1620,6 +1621,31 @@ def midpoint_status():
             result["error"] = r.text[:500]
     except Exception as exc:
         result["error"] = str(exc)
+
+    # Test POST (dry run: try creating a test role, then delete it)
+    try:
+        pr = requests.post(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json={"name": "__dm_test__", "displayName": "DM Test"},
+            timeout=5,
+        )
+        result["post_status"] = pr.status_code
+        result["post_body"]   = pr.text[:300]
+        if pr.status_code in (200, 201):
+            loc = pr.headers.get("Location", "")
+            oid = loc.rstrip("/").split("/")[-1]
+            if oid:
+                requests.delete(
+                    f"{MIDPOINT_URL}/midpoint/ws/rest/roles/{oid}",
+                    auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+                    timeout=5,
+                )
+                result["post_status"] = "201+deleted"
+    except Exception as exc:
+        result["post_error"] = str(exc)
+
     return jsonify(result)
 
 
