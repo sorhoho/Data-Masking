@@ -1584,10 +1584,41 @@ def midpoint_init_roles():
     errors  = {k: v for k, v in results.items() if v.startswith("error")}
     msg = f"midPoint roles: {created} created, {existed} already existed"
     if errors:
-        flash(msg + f" — {len(errors)} errors: {list(errors.keys())}", "warning")
+        # Show first error value so root cause is visible
+        first_err = next(iter(errors.values()))
+        flash(msg + f" — {len(errors)} errors (first: {first_err})", "warning")
     else:
         flash(msg, "success")
     return redirect(url_for("users_list"))
+
+
+@app.get("/midpoint/status")
+@login_required
+def midpoint_status():
+    """Diagnostic: test midPoint connectivity and show role counts."""
+    result = {"url": MIDPOINT_URL, "user": MIDPOINT_ADMIN_USER}
+    try:
+        r = requests.get(
+            f"{MIDPOINT_URL}/midpoint/ws/rest/roles",
+            auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
+            headers={"Accept": "application/json"},
+            timeout=5,
+        )
+        result["http_status"] = r.status_code
+        if r.ok:
+            raw = r.json().get("object", {}).get("object", [])
+            if isinstance(raw, dict):
+                raw = [raw]
+            result["roles_count"] = len(raw)
+            result["roles"] = [
+                (o.get("name", {}).get("orig", o.get("name", "?")) if isinstance(o.get("name"), dict) else o.get("name", "?"))
+                for o in raw
+            ]
+        else:
+            result["error"] = r.text[:500]
+    except Exception as exc:
+        result["error"] = str(exc)
+    return jsonify(result)
 
 
 # ── API key auth decorator ────────────────────────────────────────────────────
