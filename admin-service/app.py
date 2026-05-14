@@ -260,6 +260,9 @@ def _mp_service_oid(app_id: str) -> str | None:
 
 def _mp_create_service(app_id: str, name: str, description: str) -> str | None:
     """Create midPoint Service object (visibility/audit only — no role data). Returns OID."""
+    if not app_id:
+        app.logger.warning("_mp_create_service: empty app_id — skipping")
+        return None
     try:
         r = requests.post(
             f"{MIDPOINT_URL}/midpoint/ws/rest/services",
@@ -272,12 +275,23 @@ def _mp_create_service(app_id: str, name: str, description: str) -> str | None:
             }},
             timeout=10,
         )
-        r.raise_for_status()
+        if r.status_code == 409:
+            # Already exists — fetch OID from midPoint rather than treating as error
+            app.logger.info(f"_mp_create_service {app_id}: already exists, fetching OID")
+            _mp_invalidate()
+            _mp_service_oids_refresh()
+            return _mp_cache["service_oids"].get(app_id)
+        if not r.ok:
+            app.logger.warning(
+                f"_mp_create_service {app_id}: {r.status_code} {r.text[:300].replace(chr(10), ' ')}"
+            )
+            return None
         location = r.headers.get("Location", "")
         oid = location.rstrip("/").split("/")[-1] if location else None
         _mp_invalidate()
         return oid
-    except Exception:
+    except Exception as exc:
+        app.logger.warning(f"_mp_create_service {app_id}: exception {exc}")
         return None
 
 
@@ -307,10 +321,15 @@ def _mp_update_service_meta(app_id: str) -> bool:
             }},
             timeout=10,
         )
-        r.raise_for_status()
+        if not r.ok:
+            app.logger.warning(
+                f"_mp_update_service_meta {app_id}: {r.status_code} {r.text[:200].replace(chr(10), ' ')}"
+            )
+            return False
         _mp_invalidate()
         return True
-    except Exception:
+    except Exception as exc:
+        app.logger.warning(f"_mp_update_service_meta {app_id}: exception {exc}")
         return False
 
 
@@ -420,6 +439,11 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
             )
             get_r.raise_for_status()
             role_obj = get_r.json().get("object", {})
+            if not role_obj.get("oid"):
+                app.logger.warning(f"_mp_set_app_roles: GET role {role_name} returned no oid")
+                success = False
+                continue
+
             inds = role_obj.get("inducement", [])
             if isinstance(inds, dict):
                 inds = [inds]
@@ -431,18 +455,26 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
                 inds = [i for i in inds
                         if i.get("targetRef", {}).get("oid") != service_oid]
 
-            role_obj["inducement"] = inds
-            role_obj.pop("version", None)
-
+            # Send minimal PUT — avoid re-submitting system fields (operationExecution,
+            # metadata, trigger, fetchResult) which can cause midPoint addObject errors.
+            put_body = {"oid": role_oid, "name": role_name, "inducement": inds}
             put_r = requests.put(
                 f"{MIDPOINT_URL}/midpoint/ws/rest/roles/{role_oid}",
                 auth=(MIDPOINT_ADMIN_USER, MIDPOINT_ADMIN_PASS),
                 headers={"Content-Type": "application/json"},
-                json={"role": role_obj},
+                json={"role": put_body},
                 timeout=10,
             )
-            put_r.raise_for_status()
-        except Exception:
+            if not put_r.ok:
+                app.logger.warning(
+                    f"_mp_set_app_roles PUT {role_name}: {put_r.status_code} "
+                    f"{put_r.text[:300].replace(chr(10), ' ')}"
+                )
+                success = False
+            else:
+                put_r.raise_for_status()
+        except Exception as exc:
+            app.logger.warning(f"_mp_set_app_roles {role_name}: exception {exc}")
             success = False
 
     _mp_invalidate_inducements()
