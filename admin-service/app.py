@@ -429,6 +429,8 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
     for role_name in changed:
         role_oid = roles_map.get(role_name)
         if not role_oid:
+            app.logger.warning(f"_mp_set_app_roles: role {role_name} not found in midPoint — run Init midPoint Roles first")
+            success = False
             continue
         try:
             get_r = requests.get(
@@ -438,11 +440,14 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
                 timeout=5,
             )
             get_r.raise_for_status()
-            role_obj = get_r.json().get("object", {})
-            if not role_obj.get("oid"):
-                app.logger.warning(f"_mp_set_app_roles: GET role {role_name} returned no oid")
-                success = False
-                continue
+            raw_json = get_r.json()
+            # midPoint single GET may return {"object": {...}} or {"role": {...}} depending
+            # on serialization; try both. Use role_oid from _mp_roles_map() as authoritative OID.
+            role_obj = raw_json.get("object") or raw_json.get("role") or {}
+            app.logger.debug(
+                f"_mp_set_app_roles GET {role_name}: top_keys={list(raw_json.keys())} "
+                f"obj_keys={list(role_obj.keys())[:8]}"
+            )
 
             inds = role_obj.get("inducement", [])
             if isinstance(inds, dict):
@@ -455,8 +460,9 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
                 inds = [i for i in inds
                         if i.get("targetRef", {}).get("oid") != service_oid]
 
-            # Send minimal PUT — avoid re-submitting system fields (operationExecution,
-            # metadata, trigger, fetchResult) which can cause midPoint addObject errors.
+            # Minimal PUT body — avoid re-submitting system fields (operationExecution,
+            # metadata, trigger, fetchResult) which cause midPoint addObject errors.
+            # Use role_oid from _mp_roles_map() rather than role_obj.get("oid").
             put_body = {"oid": role_oid, "name": role_name, "inducement": inds}
             put_r = requests.put(
                 f"{MIDPOINT_URL}/midpoint/ws/rest/roles/{role_oid}",
@@ -471,8 +477,6 @@ def _mp_set_app_roles(app_id: str, service_oid: str, selected_roles: list) -> bo
                     f"{put_r.text[:300].replace(chr(10), ' ')}"
                 )
                 success = False
-            else:
-                put_r.raise_for_status()
         except Exception as exc:
             app.logger.warning(f"_mp_set_app_roles {role_name}: exception {exc}")
             success = False
