@@ -86,10 +86,17 @@
           {% endif %}
         </div>
       </div>
+        {% if recent_syncs and recent_syncs[0].bundle_revision %}
+          <div class="text-muted small">
+            Bundle: <span class="badge bg-secondary">{{ recent_syncs[0].bundle_revision }}</span>
+          </div>
+        {% endif %}
+      </div>
       <div class="card-footer bg-transparent text-center">
         <form method="post" action="/sync">
           <button class="btn btn-sm btn-outline-secondary" type="submit">Re-sync</button>
         </form>
+        <a href="/versions" class="btn btn-sm btn-outline-primary mt-1">Manage Versions</a>
       </div>
     </div>
   </div>

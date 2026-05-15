@@ -785,6 +785,15 @@ def init_db():
             first_used_at TIMESTAMPTZ,
             used_at      TIMESTAMPTZ
         )""",
+        """CREATE TABLE IF NOT EXISTS policy_versions (
+            version     SERIAL  PRIMARY KEY,
+            created_at  TEXT    NOT NULL,
+            created_by  TEXT    NOT NULL DEFAULT 'admin',
+            description TEXT    NOT NULL DEFAULT '',
+            config_json TEXT    NOT NULL,
+            is_active   BOOLEAN NOT NULL DEFAULT FALSE
+        )""",
+        "ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS bundle_revision TEXT",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -946,15 +955,63 @@ def get_config():
     }
 
 
+# ── Policy versioning ─────────────────────────────────────────────────────────
+
+def get_active_version() -> dict | None:
+    """Return active policy_versions row or None if nothing published yet."""
+    conn = get_db()
+    row  = qone(conn,
+        "SELECT version, created_at, created_by, description, config_json "
+        "FROM policy_versions WHERE is_active = TRUE ORDER BY version DESC LIMIT 1"
+    )
+    conn.close()
+    return dict(row) if row else None
+
+
+def publish_version(description: str = "") -> int:
+    """Snapshot current get_config() as new version, activate it. Returns version number."""
+    config_json = json.dumps(get_config())
+    now         = datetime.utcnow().isoformat()
+    conn        = get_db()
+    execute(conn, "UPDATE policy_versions SET is_active = FALSE WHERE is_active = TRUE")
+    execute(conn,
+        "INSERT INTO policy_versions (created_at, created_by, description, config_json, is_active) "
+        "VALUES (%s, %s, %s, %s, TRUE)",
+        (now, ADMIN_USER, description, config_json),
+    )
+    row = qone(conn,
+        "SELECT version FROM policy_versions ORDER BY version DESC LIMIT 1"
+    )
+    conn.commit()
+    conn.close()
+    return row["version"] if row else 1
+
+
+def activate_version(version: int) -> bool:
+    """Mark version as active (rollback). Returns True on success."""
+    conn = get_db()
+    row  = qone(conn, "SELECT version FROM policy_versions WHERE version = %s", (version,))
+    if not row:
+        conn.close()
+        return False
+    execute(conn, "UPDATE policy_versions SET is_active = FALSE WHERE is_active = TRUE")
+    execute(conn, "UPDATE policy_versions SET is_active = TRUE  WHERE version = %s", (version,))
+    conn.commit()
+    conn.close()
+    return True
+
+
 # ── OPA sync ──────────────────────────────────────────────────────────────────
 
-def sync_to_opa(retries=3):
+def sync_to_opa(retries=3, bundle_revision: str | None = None):
+    active  = get_active_version()
+    rev     = bundle_revision or (f"v{active['version']}" if active else "draft")
     status  = "ok"
-    message = "bundle mode — OPA polls /bundle/masking_config.tar.gz automatically (≤60s)"
-    conn = get_db()
+    message = f"bundle mode — OPA polls /bundle/masking_config.tar.gz automatically (≤60s) [{rev}]"
+    conn    = get_db()
     execute(conn,
-        "INSERT INTO sync_log (synced_at, status, message) VALUES (%s, %s, %s)",
-        (datetime.utcnow().isoformat(), status, message),
+        "INSERT INTO sync_log (synced_at, status, message, bundle_revision) VALUES (%s, %s, %s, %s)",
+        (datetime.utcnow().isoformat(), status, message, rev),
     )
     conn.commit()
     conn.close()
@@ -964,9 +1021,22 @@ def sync_to_opa(retries=3):
 # ── OPA bundle endpoint ───────────────────────────────────────────────────────
 
 def build_bundle():
-    config         = get_config()
+    active = get_active_version()
+    if active:
+        config   = json.loads(active["config_json"])
+        revision = f"v{active['version']}"
+    else:
+        config   = get_config()
+        revision = "draft"
+
+    config["meta"] = {
+        "version":      active["version"] if active else None,
+        "published_at": active["created_at"] if active else None,
+        "revision":     revision,
+    }
+
     data_bytes     = json.dumps(config).encode("utf-8")
-    manifest_bytes = json.dumps({"revision": "", "roots": ["masking_config"]}).encode("utf-8")
+    manifest_bytes = json.dumps({"revision": revision, "roots": ["masking_config"]}).encode("utf-8")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         minfo      = tarfile.TarInfo(name=".manifest")
@@ -1548,6 +1618,51 @@ def manual_sync():
 @login_required
 def api_config():
     return jsonify(get_config())
+
+
+# ── Policy versioning ─────────────────────────────────────────────────────────
+
+@app.get("/versions")
+@login_required
+def versions_list():
+    conn = get_db()
+    rows = qrows(conn, "SELECT version, created_at, created_by, description, is_active FROM policy_versions ORDER BY version DESC")
+    conn.close()
+    return render_template("versions.html", versions=rows)
+
+
+@app.post("/versions/publish")
+@login_required
+def versions_publish():
+    description = (request.form.get("description") or "").strip()
+    ver = publish_version(description)
+    sync_to_opa()
+    flash(f"Published v{ver} — OPA reloads within 60s.", "success")
+    return redirect(url_for("versions_list"))
+
+
+@app.post("/versions/<int:ver>/activate")
+@login_required
+def versions_activate(ver):
+    ok = activate_version(ver)
+    if not ok:
+        flash(f"Version {ver} not found.", "danger")
+        return redirect(url_for("versions_list"))
+    sync_to_opa()
+    flash(f"Rolled back to v{ver} — OPA reloads within 60s.", "success")
+    return redirect(url_for("versions_list"))
+
+
+@app.get("/api/policy-version")
+def api_policy_version():
+    active = get_active_version()
+    if active:
+        return jsonify({
+            "version":      active["version"],
+            "published_at": active["created_at"],
+            "description":  active["description"],
+        })
+    return jsonify({"version": None, "published_at": None, "description": "draft — no version published yet"})
 
 
 # ── Keycloak Admin API helpers ────────────────────────────────────────────────

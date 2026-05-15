@@ -338,6 +338,11 @@ default effective_allow := false
 
 # ── Decision entry point ──────────────────────────────────────────────────────
 
+_policy_version := data.masking_config.meta.version if {
+    data.masking_config.meta.version
+}
+default _policy_version := null
+
 decision := {
     "allow":          effective_allow,
     "is_vip":         is_vip,
@@ -345,4 +350,5 @@ decision := {
     "masked_fields":  masked_fields,
     "backend_fields": backend_fields,
     "fired_rules":    _fired_rules,
+    "policy_version": _policy_version,
 }

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Policy Versions – Data Masking Admin{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">&#128204; Policy Versions</h4>
+</div>
+
+{# ── Publish new version ──────────────────────────────────────────────────── #}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header fw-bold">Publish New Version</div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Snapshots the current live configuration into an immutable version. OPA will serve this
+      snapshot until the next publish or rollback. Changes made after publishing remain in the
+      live DB draft but do not affect OPA until a new version is published.
+    </p>
+    <form method="post" action="/versions/publish" class="row g-2 align-items-end">
+      <div class="col-md-8">
+        <label class="form-label fw-semibold">Description <span class="text-muted fw-normal">(optional)</span></label>
+        <input type="text" class="form-control" name="description"
+               placeholder="e.g. Add fraud_analyst unmask for billing fields">
+      </div>
+      <div class="col-md-4">
+        <button class="btn btn-primary w-100" type="submit">&#128204; Publish Version</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ── Version history table ────────────────────────────────────────────────── #}
+<div class="card border-0 shadow-sm">
+  <div class="card-header fw-bold">Version History</div>
+  <div class="card-body p-0">
+    {% if versions %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-dark">
+          <tr>
+            <th>Version</th>
+            <th>Published At</th>
+            <th>Published By</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for v in versions %}
+          <tr {% if v.is_active %}class="table-success"{% endif %}>
+            <td><span class="badge bg-secondary fs-6">v{{ v.version }}</span></td>
+            <td class="text-muted small">{{ v.created_at[:19] | replace('T', ' ') }} UTC</td>
+            <td>{{ v.created_by }}</td>
+            <td>{{ v.description or '—' }}</td>
+            <td>
+              {% if v.is_active %}
+                <span class="badge bg-success">&#9679; Active</span>
+              {% else %}
+                <span class="badge bg-light text-muted">Inactive</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if not v.is_active %}
+              <form method="post" action="/versions/{{ v.version }}/activate"
+                    onsubmit="return confirm('Roll back to v{{ v.version }}? OPA will serve this snapshot.')">
+                <button class="btn btn-sm btn-outline-warning" type="submit">&#8635; Activate (Rollback)</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      No versions published yet. OPA serves the live DB as <code>draft</code> until you publish.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="mt-3 text-muted small">
+  External systems can query the active version: <code>GET /api/policy-version</code>
+</div>
+{% endblock %}
