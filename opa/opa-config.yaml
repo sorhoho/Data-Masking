@@ -1,17 +1,19 @@
 # OPA runtime configuration
-# - Bundle mode: OPA polls admin-service for masking_config instead of
-#   relying on the in-memory data API PUT (which would be lost on restart).
-# - Decision logging: every policy evaluation is emitted to stdout as
+# - Bundle mode: OPA polls bundle server for masking_config instead of
+#   relying on in-memory data API (which would be lost on restart).
+# - BUNDLE_SERVICE_URL env var: defaults to http://admin-service:8888.
+#   Override to point at a remote admin-service when running centralized.
+# - Decision logging: every policy evaluation emitted to stdout as
 #   structured JSON, captured by Docker and queryable via Loki/Grafana.
 
 services:
-  admin_service:
-    url: http://admin-service:8888
+  bundle_server:
+    url: ${BUNDLE_SERVICE_URL}
 
 bundles:
   masking_config:
     resource: "/bundle/masking_config.tar.gz"
-    service: admin_service
+    service: bundle_server
     polling:
       min_delay_seconds: 15
       max_delay_seconds: 60

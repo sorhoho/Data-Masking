@@ -36,10 +36,13 @@ services:
       - postgres
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
+  # Dev: single replica. For HA/centralized: docker-compose.ha.yml override.
   opa:
     build: ./opa
     ports:
       - "8181:8181"
+    environment:
+      BUNDLE_SERVICE_URL: "http://admin-service:8888"
     depends_on:
       - admin-service
 

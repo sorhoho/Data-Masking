@@ -1,0 +1,48 @@
+# HA / Centralized OPA overlay
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.ha.yml up
+#
+# Replaces the single `opa` service with nginx LB + 3 OPA replicas.
+# All callers (Kong, admin-service, Fuse, Apigee) use http://opa:8181 —
+# the nginx container takes that service name so no other config changes.
+
+version: "3.8"
+
+services:
+
+  # nginx LB takes the "opa" service name — all callers unchanged
+  opa:
+    image: nginx:1.27-alpine
+    build: null
+    volumes:
+      - ./opa/nginx-ha.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8181:8181"
+    environment: {}
+    depends_on:
+      - opa-1
+      - opa-2
+      - opa-3
+
+  opa-1:
+    build: ./opa
+    environment:
+      BUNDLE_SERVICE_URL: "http://admin-service:8888"
+    depends_on:
+      - admin-service
+    restart: on-failure
+
+  opa-2:
+    build: ./opa
+    environment:
+      BUNDLE_SERVICE_URL: "http://admin-service:8888"
+    depends_on:
+      - admin-service
+    restart: on-failure
+
+  opa-3:
+    build: ./opa
+    environment:
+      BUNDLE_SERVICE_URL: "http://admin-service:8888"
+    depends_on:
+      - admin-service
+    restart: on-failure
