@@ -3,6 +3,7 @@
     <midpoint>
         <repository>
             <type>native</type>
+            <database>postgresql</database>
             <jdbcUrl>jdbc:postgresql://postgres:5432/midpoint</jdbcUrl>
             <jdbcUsername>midpoint</jdbcUsername>
             <jdbcPassword>midpoint_pass</jdbcPassword>

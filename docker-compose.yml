@@ -90,14 +90,14 @@ services:
       - "8090:8080"
     environment:
       MP_SET_midpoint_administrator_initialPassword: "Admin123!"
-      # Force native PostgreSQL repository — overrides any stale H2 config in volume
+      # Native PostgreSQL repository — database= forces explicit org.postgresql.Driver load
       MP_SET_midpoint_repository_type: "native"
+      MP_SET_midpoint_repository_database: "postgresql"
       MP_SET_midpoint_repository_jdbcUrl: "jdbc:postgresql://postgres:5432/midpoint"
       MP_SET_midpoint_repository_jdbcUsername: "midpoint"
       MP_SET_midpoint_repository_jdbcPassword: "midpoint_pass"
     volumes:
       - midpoint-home:/opt/midpoint/var
-      - ./midpoint/config/config.xml:/opt/midpoint/var/config/config.xml
       - ./midpoint/post-initial-objects:/opt/midpoint/var/post-initial-objects
     depends_on:
       postgres:
