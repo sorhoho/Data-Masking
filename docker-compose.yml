@@ -4,7 +4,7 @@ services:
 
   # ── PostgreSQL (shared by Keycloak, admin-service, midPoint) ─────────────────
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
@@ -12,6 +12,12 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   # ── Identity Provider ─────────────────────────────────────────────────────
   keycloak:
@@ -33,7 +39,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   # ── Policy Engine (Open Policy Agent) ────────────────────────────────────
   opa:
@@ -71,8 +78,10 @@ services:
       MIDPOINT_ADMIN_USER: "administrator"
       MIDPOINT_ADMIN_PASS: "5ecr3t"
     depends_on:
-      - postgres
-      - midpoint
+      postgres:
+        condition: service_healthy
+      midpoint:
+        condition: service_started
 
   # ── Identity Governance (midPoint IGA) ───────────────────────────────────
   midpoint:
@@ -81,12 +90,18 @@ services:
       - "8090:8080"
     environment:
       MP_SET_midpoint_administrator_initialPassword: "Admin123!"
+      # Force native PostgreSQL repository — overrides any stale H2 config in volume
+      MP_SET_midpoint_repository_type: "native"
+      MP_SET_midpoint_repository_jdbcUrl: "jdbc:postgresql://postgres:5432/midpoint"
+      MP_SET_midpoint_repository_jdbcUsername: "midpoint"
+      MP_SET_midpoint_repository_jdbcPassword: "midpoint_pass"
     volumes:
       - midpoint-home:/opt/midpoint/var
       - ./midpoint/config/config.xml:/opt/midpoint/var/config/config.xml
       - ./midpoint/post-initial-objects:/opt/midpoint/var/post-initial-objects
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: on-failure
 
   # ── API Gateway (Kong) ────────────────────────────────────────────────────
