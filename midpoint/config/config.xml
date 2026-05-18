@@ -1,15 +1,30 @@
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<?xml version="1.0"?>
 <configuration>
     <midpoint>
+        <webApplication>
+            <importFolder>${midpoint.home}/import</importFolder>
+        </webApplication>
         <repository>
             <type>native</type>
-            <database>postgresql</database>
             <jdbcUrl>jdbc:postgresql://postgres:5432/midpoint</jdbcUrl>
             <jdbcUsername>midpoint</jdbcUsername>
             <jdbcPassword>midpoint_pass</jdbcPassword>
         </repository>
+        <audit>
+            <auditService>
+                <auditServiceFactoryClass>com.evolveum.midpoint.audit.impl.LoggerAuditServiceFactory</auditServiceFactoryClass>
+            </auditService>
+            <auditService>
+                <auditServiceFactoryClass>com.evolveum.midpoint.repo.sqale.audit.SqaleAuditServiceFactory</auditServiceFactoryClass>
+            </auditService>
+        </audit>
+        <icf>
+            <scanClasspath>true</scanClasspath>
+            <scanDirectory>${midpoint.home}/icf-connectors</scanDirectory>
+            <scanDirectory>${midpoint.home}/connid-connectors</scanDirectory>
+        </icf>
         <keystore>
-            <keyStorePath>keystore.jceks</keyStorePath>
+            <keyStorePath>${midpoint.home}/keystore.jceks</keyStorePath>
             <keyStorePassword>changeit</keyStorePassword>
             <encryptionKeyAlias>default</encryptionKeyAlias>
         </keystore>
