@@ -255,10 +255,13 @@ _purposes_match(purposes) if { _purpose in purposes }
 _channels_match(channels) if { count(channels) == 0 }
 _channels_match(channels) if { _channel in channels }
 
-_wh_matches(rule) if { not is_boolean(rule.condition_in_working_hours) }
 _wh_matches(rule) if {
-    is_boolean(rule.condition_in_working_hours)
-    rule.condition_in_working_hours == _in_working_hours
+    # object.get returns null when key absent; is_boolean(null)=false → not false = true
+    not is_boolean(object.get(rule, "condition_in_working_hours", null))
+}
+_wh_matches(rule) if {
+    is_boolean(object.get(rule, "condition_in_working_hours", null))
+    object.get(rule, "condition_in_working_hours", null) == _in_working_hours
 }
 
 _rule_matches(rule) if {
