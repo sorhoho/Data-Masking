@@ -64,7 +64,9 @@ services:
 
   # ── Admin GUI — data masking policy + unmask approval ────────────────────
   admin-service:
-    build: ./admin-service
+    build:
+      context: .
+      dockerfile: admin-service/Dockerfile
     ports:
       - "8888:8888"
     environment:
@@ -173,6 +175,97 @@ services:
       - keycloak
     restart: on-failure
 
+  # ── Kafka-compatible broker (Redpanda) ───────────────────────────────────────
+  redpanda:
+    image: redpandadata/redpanda:v23.3.21
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda:8082
+      - --schema-registry-addr=0.0.0.0:8081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy: true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: on-failure
+
+  # ── Kafka masking service ────────────────────────────────────────────────────
+  kafka-masker:
+    build:
+      context: .
+      dockerfile: kafka-masker/Dockerfile
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      OPA_URL: http://opa:8181
+      RAW_TOPIC: raw.customer.events
+      DLQ_TOPIC: dlq.masking.errors
+      CONSUMER_GROUP: masking-group
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      opa:
+        condition: service_started
+    restart: on-failure
+
+  # ── MinIO (S3-compatible data lake storage) ──────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: on-failure
+
+  # ── DW / Lake / Mart masking service ────────────────────────────────────────
+  dw-masker:
+    build:
+      context: .
+      dockerfile: dw-masker/Dockerfile
+    ports:
+      - "5003:5003"
+    environment:
+      OPA_URL: http://opa:8181
+      DB_URL: postgresql://adminuser:admin_pass@postgres:5432/admindb
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      MINIO_BUCKET: masked-exports
+      ADMIN_SERVICE_URL: http://admin-service:8888
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      opa:
+        condition: service_started
+    restart: on-failure
+
 networks:
   default:
     name: data-masking-network
@@ -180,3 +273,4 @@ networks:
 volumes:
   postgres-data:
   midpoint-home:
+  minio-data:

@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import os
@@ -10,7 +11,15 @@ import psycopg2.errors
 from datetime import datetime
 from functools import wraps
 from flask import (Flask, make_response, render_template, request, redirect,
-                   url_for, session, flash, jsonify)
+                   url_for, session, flash, jsonify, send_file)
+
+# Optional: masking_sdk available when running inside Docker (COPY ../masking_sdk)
+try:
+    from masking_sdk.masking import apply_masking
+    from masking_sdk.opa_client import get_masked_fields as _opa_get_masked_fields
+    _MASKING_SDK = True
+except ImportError:
+    _MASKING_SDK = False
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "admin-secret-key")
@@ -794,6 +803,15 @@ def init_db():
             is_active   BOOLEAN NOT NULL DEFAULT FALSE
         )""",
         "ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS bundle_revision TEXT",
+        """CREATE TABLE IF NOT EXISTS dw_exports (
+            id             SERIAL  PRIMARY KEY,
+            exported_at    TEXT    NOT NULL,
+            role           TEXT    NOT NULL,
+            table_name     TEXT    NOT NULL,
+            row_count      INTEGER NOT NULL,
+            s3_path        TEXT    NOT NULL,
+            policy_version INTEGER
+        )""",
     ]
     for stmt in stmts:
         execute(conn, stmt)
@@ -2092,6 +2110,195 @@ def unmask_validate(token_id):
         "fields":      list(row["fields"] or []),
         "reason_code": row["reason_code"],
         "username":    row["username"],
+    })
+
+
+# ── Batch / File masking ──────────────────────────────────────────────────────
+
+def _opa_masked_fields(role: str, customer_id: str) -> list:
+    """Call OPA and return masked_fields list. Raises PermissionError if denied."""
+    if _MASKING_SDK:
+        return _opa_get_masked_fields(role, customer_id, path="/api/batch")
+    payload = {"input": {"role": role, "customer_id": customer_id,
+                          "path": "/api/batch", "ctx": {}}}
+    r = requests.post(f"{OPA_URL}/v1/data/data_masking/decision",
+                      json=payload, timeout=5)
+    r.raise_for_status()
+    decision = r.json().get("result", {})
+    if not decision.get("allow", False):
+        raise PermissionError("OPA denied")
+    return decision.get("masked_fields", [])
+
+
+def _apply_masks(record: dict, masked_fields: list) -> dict:
+    if _MASKING_SDK:
+        return apply_masking(record, masked_fields)
+    # Inline fallback — same logic as masking_sdk.masking.apply_masking
+    import re
+    out = dict(record)
+    for f in masked_fields:
+        v = out.get(f)
+        if v is None:
+            continue
+        s = str(v)
+        if f == "email":
+            m = re.match(r"^([^@]+)@(.+)$", s)
+            if m:
+                u, d = m.group(1), m.group(2)
+                out[f] = (u[0] + "*" * (len(u)-2) + u[-1] if len(u) > 2
+                          else "*" * len(u)) + "@" + d
+            else:
+                out[f] = "***"
+        elif f == "msisdn":
+            m = re.match(r"^(\+\d{1,2})(\d+)$", s)
+            if m:
+                p, d = m.group(1), m.group(2)
+                out[f] = p + ("*"*(len(d)-2) + d[-2:] if len(d) > 2 else "*"*len(d))
+            else:
+                out[f] = s[:3] + "*"*(len(s)-5) + s[-2:] if len(s) > 4 else "***"
+        elif f == "name":
+            out[f] = " ".join(w[0]+"*"*(len(w)-1) if len(w)>1 else w
+                              for w in s.split())
+        elif f == "national_id":
+            out[f] = s[:2] + "*"*(len(s)-2) if len(s) > 2 else "*"*len(s)
+        elif f == "address":
+            out[f] = "*** (redacted)"
+        else:
+            out[f] = "***"
+    return out
+
+
+@app.route("/mask/file", methods=["GET", "POST"])
+@login_required
+def mask_file():
+    if request.method == "GET":
+        return render_template("batch.html")
+
+    role   = request.form.get("role", "").strip()
+    fmt    = request.form.get("format", "csv").strip().lower()
+    upload = request.files.get("file")
+
+    if not role or not upload:
+        flash("Role and file are required", "danger")
+        return render_template("batch.html")
+
+    raw_bytes = upload.read()
+
+    try:
+        if fmt == "json":
+            records = json.loads(raw_bytes)
+            if isinstance(records, dict):
+                records = [records]
+        elif fmt == "parquet":
+            try:
+                import pyarrow.parquet as pq
+                import pyarrow as pa
+                tbl = pq.read_table(io.BytesIO(raw_bytes))
+                records = tbl.to_pydict()
+                keys = list(records.keys())
+                records = [{k: records[k][i] for k in keys}
+                           for i in range(len(records[keys[0]]))]
+            except ImportError:
+                flash("pyarrow not installed — only CSV and JSON supported", "danger")
+                return render_template("batch.html")
+        else:  # csv
+            text = raw_bytes.decode("utf-8-sig", errors="replace")
+            records = list(csv.DictReader(io.StringIO(text)))
+    except Exception as exc:
+        flash(f"Parse error: {exc}", "danger")
+        return render_template("batch.html")
+
+    if not records:
+        flash("File is empty", "warning")
+        return render_template("batch.html")
+
+    # Mask each record — per-customer OPA call
+    masked_rows = []
+    denied      = 0
+    for rec in records:
+        cid = str(rec.get("customer_id", ""))
+        try:
+            mf = _opa_masked_fields(role, cid)
+            masked_rows.append(_apply_masks(rec, mf))
+        except PermissionError:
+            denied += 1
+        except Exception as exc:
+            flash(f"OPA error on customer_id={cid!r}: {exc}", "danger")
+            return render_template("batch.html")
+
+    if not masked_rows:
+        flash(f"All {denied} records denied by OPA for role={role!r}", "danger")
+        return render_template("batch.html")
+
+    # Serialise output in requested format
+    if fmt == "json":
+        out_bytes    = json.dumps(masked_rows, indent=2).encode()
+        mimetype     = "application/json"
+        download_ext = "json"
+    elif fmt == "parquet":
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        buf = io.BytesIO()
+        pq.write_table(pa.Table.from_pydict(
+            {k: [r.get(k) for r in masked_rows] for k in masked_rows[0].keys()}
+        ), buf)
+        out_bytes    = buf.getvalue()
+        mimetype     = "application/octet-stream"
+        download_ext = "parquet"
+    else:
+        buf = io.StringIO()
+        w   = csv.DictWriter(buf, fieldnames=list(masked_rows[0].keys()))
+        w.writeheader()
+        w.writerows(masked_rows)
+        out_bytes    = buf.getvalue().encode()
+        mimetype     = "text/csv"
+        download_ext = "csv"
+
+    return send_file(
+        io.BytesIO(out_bytes),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=f"masked_{role}.{download_ext}",
+    )
+
+
+@app.post("/api/mask/batch")
+@require_api_key
+def api_mask_batch():
+    """
+    JSON body: {"role": "agent", "records": [...], "customer_id_field": "customer_id"}
+    Returns:   {"masked_records": [...], "denied": N, "policy_version": V}
+    """
+    body = request.get_json(force=True) or {}
+    role    = body.get("role", "").strip()
+    records = body.get("records", [])
+    cid_key = body.get("customer_id_field", "customer_id")
+
+    if not role:
+        return jsonify({"error": "role required"}), 400
+    if not isinstance(records, list):
+        return jsonify({"error": "records must be a JSON array"}), 400
+
+    masked_rows = []
+    denied      = 0
+    for rec in records:
+        cid = str(rec.get(cid_key, ""))
+        try:
+            mf = _opa_masked_fields(role, cid)
+            masked_rows.append(_apply_masks(rec, mf))
+        except PermissionError:
+            denied += 1
+        except Exception as exc:
+            return jsonify({"error": f"OPA error: {exc}"}), 502
+
+    conn = get_db()
+    ver  = scalar(conn, "SELECT version FROM policy_versions WHERE is_active LIMIT 1")
+    conn.close()
+
+    return jsonify({
+        "masked_records": masked_rows,
+        "denied":         denied,
+        "policy_version": ver,
     })
 
 

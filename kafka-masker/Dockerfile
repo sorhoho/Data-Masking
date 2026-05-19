@@ -1,8 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
-COPY admin-service/requirements.txt .
+COPY kafka-masker/requirements.txt .
 RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
-COPY admin-service/ .
 COPY masking_sdk /app/masking_sdk
-RUN mkdir -p /data
+COPY kafka-masker/app.py .
 CMD ["python", "app.py"]

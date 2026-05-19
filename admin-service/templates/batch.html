@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Batch File Masking – Admin{% endblock %}
+
+{% block content %}
+<h4 class="mb-4">&#128196; Batch File Masking</h4>
+
+<div class="row g-4">
+
+  <!-- Upload form -->
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-header fw-bold">Upload &amp; Mask File</div>
+      <div class="card-body">
+        <p class="text-muted small">
+          Upload a CSV, JSON, or Parquet file. Each row is masked according to
+          the selected role's policy. The masked file is returned as a download.
+        </p>
+        <form method="post" enctype="multipart/form-data">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Role</label>
+            <select name="role" class="form-select form-select-sm" required>
+              <option value="">-- select --</option>
+              {% for r in ["agent","supervisor","care_l1","care_l2","care_supervisor",
+                           "noc_operator","field_technician","roaming_ops",
+                           "billing_agent","fraud_analyst","compliance_officer",
+                           "audit_viewer","vip_agent","vip_care","admin","data_admin",
+                           "partner","b2b_partner","mvno_partner"] %}
+              <option value="{{r}}">{{r}}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">File</label>
+            <input type="file" name="file" class="form-control form-control-sm"
+                   accept=".csv,.json,.parquet" required>
+            <div class="form-text">Supported: CSV, JSON, Parquet</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Output Format</label>
+            <select name="format" class="form-select form-select-sm">
+              <option value="csv">CSV</option>
+              <option value="json">JSON</option>
+              <option value="parquet">Parquet</option>
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm">
+            &#128274; Mask &amp; Download
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- API docs -->
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-header fw-bold">API — <code>POST /api/mask/batch</code></div>
+      <div class="card-body">
+        <p class="text-muted small">
+          Accepts JSON, returns masked records. Requires
+          <code>X-Api-Key</code> header.
+        </p>
+        <pre class="bg-light p-3 rounded small" style="font-size:.75rem">POST /api/mask/batch
+X-Api-Key: &lt;governance-internal-key&gt;
+Content-Type: application/json
+
+{
+  "role": "agent",
+  "customer_id_field": "customer_id",
+  "records": [
+    {
+      "customer_id": "C001",
+      "name": "Alice Smith",
+      "email": "alice@example.com",
+      "msisdn": "+60123456789",
+      "national_id": "850101-01-1234",
+      "address": "123 Main St, KL"
+    }
+  ]
+}
+
+→ 200 OK
+{
+  "masked_records": [...],
+  "denied": 0,
+  "policy_version": 3
+}</pre>
+        <h6 class="mt-3 fw-semibold">Expected fields</h6>
+        <ul class="small mb-0">
+          <li><code>customer_id</code> — looked up in OPA for tier/access</li>
+          <li><code>name</code>, <code>email</code>, <code>msisdn</code></li>
+          <li><code>national_id</code>, <code>address</code></li>
+          <li><code>last_call_duration</code>, <code>data_roaming_gb</code>, <code>last_location</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mt-4">
+      <div class="card-header fw-bold">Related Services</div>
+      <div class="card-body">
+        <ul class="mb-0 small">
+          <li><strong>Kafka</strong> — consume <code>raw.customer.events</code>,
+              publish to <code>masked.customer.&lt;role&gt;</code>
+              via <code>kafka-masker</code> service</li>
+          <li><strong>Data Lake</strong> — export Parquet to MinIO via
+              <a href="http://localhost:5003" target="_blank">DW Masker &#8599;</a></li>
+          <li><strong>Data Warehouse</strong> — refresh masked PostgreSQL views at
+              <code>POST http://localhost:5003/views/refresh</code></li>
+          <li><strong>Data Mart</strong> — build mart schemas at
+              <code>POST http://localhost:5003/marts/build</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
