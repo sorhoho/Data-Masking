@@ -16,6 +16,7 @@ def get_decision(role: str, customer_id: str, path: str = "/api/batch",
             "role": role,
             "customer_id": customer_id,
             "path": path,
+            "app_id": "",
             "ctx": ctx or {},
         }
     }

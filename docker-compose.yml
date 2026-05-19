@@ -197,7 +197,7 @@ services:
       - "8082:8082"
       - "9644:9644"
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy: true'"]
+      test: ["CMD-SHELL", "rpk cluster health | grep -qE 'Healthy:\\s*true'"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -235,9 +235,9 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "mc alias set hc http://localhost:9000 minioadmin minioadmin123 >/dev/null 2>&1 && mc ready hc"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
       start_period: 10s
     restart: on-failure

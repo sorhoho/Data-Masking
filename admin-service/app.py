@@ -2120,7 +2120,7 @@ def _opa_masked_fields(role: str, customer_id: str) -> list:
     if _MASKING_SDK:
         return _opa_get_masked_fields(role, customer_id, path="/api/batch")
     payload = {"input": {"role": role, "customer_id": customer_id,
-                          "path": "/api/batch", "ctx": {}}}
+                          "path": "/api/batch", "app_id": "", "ctx": {}}}
     r = requests.post(f"{OPA_URL}/v1/data/data_masking/decision",
                       json=payload, timeout=5)
     r.raise_for_status()

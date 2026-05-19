@@ -46,14 +46,24 @@ def _dlq(producer: Producer, original_value: bytes, error: str, headers: dict):
 
 
 def _wait_for_broker(broker: str, retries: int = 10):
-    """Probe broker connectivity before starting consumer loop."""
-    from confluent_kafka.admin import AdminClient
+    """Probe broker connectivity and ensure required topics exist."""
+    from confluent_kafka.admin import AdminClient, NewTopic
     for attempt in range(retries):
         try:
             ac = AdminClient({"bootstrap.servers": broker,
                               "socket.timeout.ms": 3000})
             ac.list_topics(timeout=3)
             log.info("Broker %s reachable", broker)
+            # Ensure raw input and DLQ topics exist (idempotent)
+            for topic in (RAW_TOPIC, DLQ_TOPIC):
+                fs = ac.create_topics([NewTopic(topic, num_partitions=1,
+                                                replication_factor=1)])
+                err = fs[topic].exception()
+                if err and "already exists" not in str(err).lower() \
+                   and "topic already exists" not in str(err).lower():
+                    log.warning("create_topic %s: %s", topic, err)
+                else:
+                    log.info("Topic ready: %s", topic)
             return
         except Exception as exc:
             wait = 2 ** attempt
@@ -84,7 +94,9 @@ def main():
             if msg is None:
                 continue
             if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+                code = msg.error().code()
+                if code in (KafkaError._PARTITION_EOF,
+                            KafkaError.UNKNOWN_TOPIC_OR_PART):
                     continue
                 raise KafkaException(msg.error())
 

@@ -59,6 +59,47 @@ def get_db():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
+def init_raw_customers():
+    """Create raw_customers demo table if absent and seed sample rows."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS raw_customers (
+                    customer_id        TEXT PRIMARY KEY,
+                    name               TEXT,
+                    msisdn             TEXT,
+                    email              TEXT,
+                    national_id        TEXT,
+                    address            TEXT,
+                    last_call_duration INTEGER,
+                    data_roaming_gb    NUMERIC(8,2),
+                    last_location      TEXT
+                )
+            """)
+            cur.execute("SELECT COUNT(*) AS cnt FROM raw_customers")
+            if cur.fetchone()["cnt"] == 0:
+                cur.executemany(
+                    "INSERT INTO raw_customers VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT DO NOTHING",
+                    [
+                        ("C001","Amir bin Hamid","+60123456789","amir@example.com",
+                         "800101-14-1234","12 Jalan Taman Desa",300,2.5,"Kuala Lumpur"),
+                        ("C002","Nur Aina binti Yusof","+60197654321","aina@demo.com",
+                         "900505-10-5678","Lot 7 Jalan Merdeka 50480",120,0.0,"Shah Alam"),
+                        ("C003","Ravi s/o Krishnan","+60112233445","ravi@corp.net",
+                         "851212-07-9012","99 Jalan Ipoh 51200",45,8.1,"Penang"),
+                        ("C004","Siti Rahayu","+60165550001","siti.r@web.my",
+                         "921030-08-3456","28 Jalan Bukit Bintang",0,0.0,"Petaling Jaya"),
+                        ("C999","Test User","+60187654321","test@example.com",
+                         "900101-01-0001","1 Test Street",60,1.0,"Johor Bahru"),
+                    ]
+                )
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def get_role_masked_fields() -> dict:
     """Return {role: [masked_field, ...]} from admin-service DB."""
     conn = get_db()
@@ -144,8 +185,7 @@ def _generate_view_ddl(schema: str, role: str, masked_fields: list) -> str:
         f"CREATE SCHEMA IF NOT EXISTS {schema};\n"
         f"CREATE OR REPLACE VIEW {schema}.customers AS\n"
         f"SELECT\n  {cols_sql}\n"
-        f"FROM customer_tiers ct\n"
-        f"  LEFT JOIN LATERAL (SELECT 1) dummy ON TRUE;\n"
+        f"FROM raw_customers;\n"
         f"-- role: {role}  masked: {masked_fields}"
     )
 
@@ -180,14 +220,11 @@ def export_to_lake():
             with conn.cursor() as cur:
                 if customer_ids:
                     cur.execute(
-                        "SELECT customer_id, tier AS customer_tier FROM customer_tiers "
-                        "WHERE customer_id = ANY(%s)",
+                        "SELECT * FROM raw_customers WHERE customer_id = ANY(%s)",
                         (customer_ids,)
                     )
                 else:
-                    cur.execute(
-                        "SELECT customer_id, tier AS customer_tier FROM customer_tiers"
-                    )
+                    cur.execute("SELECT * FROM raw_customers")
                 records = [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
@@ -299,10 +336,14 @@ def build_marts():
             for role in roles:
                 masked_fields = role_masks.get(role, [])
                 view_name = f"{mart_schema}.{role.replace('-', '_')}_customers"
+                role_norm = role.replace("-", "_")
+                # Privileged roles (no masked fields) → view raw_customers directly
+                src = (f"masked_{role_norm}.customers"
+                       if masked_fields else "raw_customers")
                 ddl = (
                     f"CREATE SCHEMA IF NOT EXISTS {mart_schema};\n"
                     f"CREATE OR REPLACE VIEW {view_name} AS\n"
-                    f"SELECT * FROM masked_{role.replace('-','_')}.customers;"
+                    f"SELECT * FROM {src};"
                 )
                 try:
                     with conn.cursor() as cur:
@@ -507,4 +548,5 @@ async function postAndShow(url, target) {
 
 
 if __name__ == "__main__":
+    init_raw_customers()
     app.run(host="0.0.0.0", port=5003, debug=False)
