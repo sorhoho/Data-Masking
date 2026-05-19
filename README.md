@@ -1,9 +1,11 @@
-# Data Masking PoC — Keycloak · Kong · OPA · Identity Governance
+# Data Masking PoC — Keycloak · Kong · OPA · Identity Governance · File · Kafka · DW/Lake
 
-A self-contained Docker Compose stack demonstrating **role-based PII masking enforced at the API
-gateway**, combined with an **identity governance layer** (access requests, access reviews,
-separation-of-duties, T1/T2 unmask approval) and a **multi-app frontend hub** with per-application
-OIDC clients and app-role enforcement.
+A self-contained Docker Compose stack demonstrating **role-based PII masking enforced across
+multiple integration channels**: API gateway (Kong), batch file processing, Kafka streaming events,
+and data warehouse / lake / mart exports. All channels share a single OPA bundle as the masking
+policy source of truth, combined with an **identity governance layer** (access requests, access
+reviews, separation-of-duties, T1/T2 unmask approval) and a **multi-app frontend hub** with
+per-application OIDC clients and app-role enforcement.
 
 ---
 
@@ -19,20 +21,24 @@ OIDC clients and app-role enforcement.
 8. [Context signals](#context-signals)
 9. [VIP customer controls](#vip-customer-controls)
 10. [Partner role](#partner-role)
-11. [Services](#services)
-12. [Portals and credentials](#portals-and-credentials)
-13. [Quick start](#quick-start)
-14. [Demo users](#demo-users)
-15. [Test data](#test-data)
-16. [API reference](#api-reference)
-17. [Sample requests and responses](#sample-requests-and-responses)
-18. [OPA policy internals](#opa-policy-internals)
-19. [Identity governance](#identity-governance)
-20. [Frontend hub](#frontend-hub)
-21. [Admin GUI](#admin-gui)
-22. [Component map](#component-map)
-23. [Startup order](#startup-order)
-24. [Production notes](#production-notes)
+11. [File and batch masking](#file-and-batch-masking)
+12. [Kafka streaming masking](#kafka-streaming-masking)
+13. [Data warehouse / lake / mart masking](#data-warehouse--lake--mart-masking)
+14. [Shared masking SDK](#shared-masking-sdk)
+15. [Services](#services)
+16. [Portals and credentials](#portals-and-credentials)
+17. [Quick start](#quick-start)
+18. [Demo users](#demo-users)
+19. [Test data](#test-data)
+20. [API reference](#api-reference)
+21. [Sample requests and responses](#sample-requests-and-responses)
+22. [OPA policy internals](#opa-policy-internals)
+23. [Identity governance](#identity-governance)
+24. [Frontend hub](#frontend-hub)
+25. [Admin GUI](#admin-gui)
+26. [Component map](#component-map)
+27. [Startup order](#startup-order)
+28. [Production notes](#production-notes)
 
 ---
 
@@ -54,25 +60,30 @@ OIDC clients and app-role enforcement.
 │                           │  (also: Website :3000 — standalone OIDC portal) │
 │                           ▼                                                  │
 │  Kong Gateway :8000  (DB-less, Lua serverless plugins)                      │
-│    │  Verify JWT RS256 — JWKS fetch + 5-min per-worker cache              │
-│    │  Detect backend (path prefix)                                         │
-│    │  Resolve MSISDN → customer_id  (best-effort, CRM internal)           │
-│    │  Call OPA with role + customer_id + path + backend + ctx             │
-│    │      ◄── allow/deny  +  masked_fields  +  is_vip                    │
-│    │           +  backend_fields  +  tier check                          │
-│    │  Enforce X-Access-Reference for VIP                                  │
-│    │  Enforce X-Unmask-Token for /api/unmask/* (T1/T2 gate)              │
-│    │      Validate token at Governance :8889 — single-use, 15-min TTL   │
-│    │  Forward request                                                     │
-│    │      ├─► CRM Mock     (internal, canonical field names)             │
-│    │      └─► Billing Mock (internal, aliased field names)               │
-│    │  Two-pass response masking (Lua)                                     │
-│    │      Pass 1 — canonical field names                                  │
-│    │      Pass 2 — backend alias names                                    │
+│    │  Verify JWT RS256 · Call OPA · Mask response fields (2-pass Lua)      │
+│    │      ├─► CRM Mock     (canonical field names)                         │
+│    │      └─► Billing Mock (aliased field names)                           │
 │    ▼                                                                         │
 │  Masked JSON → rendered in browser                                          │
 │                                                                              │
-│  Admin GUI :8888  ──  config stored in PostgreSQL :5432                     │
+│  ── NEW: Non-API masking channels (all share same OPA bundle policy) ──     │
+│                                                                              │
+│  Admin GUI :8888  ──  File/Batch masking                                    │
+│    POST /api/mask/batch   JSON records → masked JSON (API key auth)         │
+│    GET/POST /mask/file    CSV / JSON / Parquet upload → masked download     │
+│                                                                              │
+│  Kafka Masker  (kafka-masker container)                                     │
+│    Consumes  raw.customer.events  (Redpanda :9092)                          │
+│    Headers: X-Role, X-Customer-Id → OPA decision → apply masking           │
+│    Publishes masked.customer.<role>  (one output topic per role)            │
+│    Dead-letter queue: dlq.masking.errors                                    │
+│                                                                              │
+│  DW / Lake / Mart Masker :5003                                              │
+│    POST /views/refresh  → masked SQL VIEWs in PostgreSQL (one per role)    │
+│    POST /export         → masked Parquet files in MinIO :9000/:9001         │
+│    POST /marts/build    → mart schemas (mart_care, mart_billing, etc.)     │
+│                                                                              │
+│  Admin GUI :8888  ──  policy config stored in PostgreSQL :5432              │
 │    Customer tiers · role-field matrix · backend field registry              │
 │    Application registry · app-role grants                                   │
 │    User lifecycle (onboard / role-change / offboard via Keycloak Admin API) │
@@ -381,6 +392,231 @@ curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
 
 ---
 
+## File and batch masking
+
+Two entry points in the Admin Service apply OPA-governed masking to records that arrive outside the API gateway (e.g. data extracts, migration scripts, downstream ETL inputs).
+
+### `POST /api/mask/batch` — programmatic
+
+Accepts a JSON array of records and returns them masked. Requires `X-Api-Key` header.
+
+```bash
+curl -s -X POST http://localhost:8888/api/mask/batch \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: governance-internal-key" \
+  -d '{
+    "role": "agent",
+    "records": [
+      {"customer_id":"C002","name":"Siti Nurhaliza","msisdn":"+60198765432",
+       "email":"siti@email.com","national_id":"920720-10-8812"}
+    ]
+  }' | jq
+```
+
+**Response**
+```json
+{
+  "masked_records": [
+    {"customer_id":"C002","name":"S*** N*********","msisdn":"+6019****32",
+     "email":"s***i@email.com","national_id":"92************"}
+  ],
+  "denied": 0,
+  "policy_version": 3
+}
+```
+
+- `denied` counts records where OPA returned `allow=false` (e.g. VIP customer + insufficient role) — they are dropped, not masked.
+- `customer_id_field` body key lets callers specify which field holds the customer ID (default `"customer_id"`).
+
+### `GET / POST /mask/file` — browser upload
+
+Browser form at **http://localhost:8888/mask/file**:
+
+1. Upload a CSV, JSON, or Parquet file.
+2. Select a role.
+3. Download the masked file — same format as input.
+
+Parquet support uses `pyarrow`; field names in the file are matched against the canonical 8-field list.
+
+### How OPA is called
+
+For each record, the masking path calls:
+
+```
+POST http://opa:8181/v1/data/data_masking/decision
+Body: {"input": {"role": "...", "customer_id": "...", "path": "/api/batch", "app_id": "", "ctx": {}}}
+```
+
+The `app_id: ""` is required — OPA 1.x does not negate an absent key cleanly; an empty string falls through the open-registration path (`not app_roles_config[""]` succeeds).
+
+---
+
+## Kafka streaming masking
+
+The `kafka-masker` service sits between a **raw** topic and per-role **masked** topics in Redpanda (Kafka-compatible).
+
+### Topics
+
+| Topic | Direction | Description |
+|---|---|---|
+| `raw.customer.events` | Input | Upstream systems produce PII-complete records here |
+| `masked.customer.<role>` | Output | One output topic per role (e.g. `masked.customer.care_l2`) |
+| `dlq.masking.errors` | Dead-letter | Records that fail JSON parsing or get OPA-denied |
+
+### Message contract
+
+**Producer side** — include headers:
+
+| Header | Required | Description |
+|---|---|---|
+| `X-Role` | Yes | Role of the downstream consumer (`agent`, `care_l2`, etc.) |
+| `X-Customer-Id` | Recommended | Falls back to `record["customer_id"]` if absent |
+
+**Consumer side** — receive masked JSON; same headers forwarded. Fields absent in the record are ignored (no error).
+
+### Produce a test event
+
+```bash
+echo '{"customer_id":"C002","name":"Siti Nurhaliza","msisdn":"+60198765432",
+       "email":"siti@email.com","national_id":"920720-10-8812"}' | \
+  docker exec -i data-masking-redpanda-1 rpk topic produce raw.customer.events \
+    -H "X-Role:care_l2" -H "X-Customer-Id:C002" -f "%v"
+```
+
+### Read masked output
+
+```bash
+docker exec data-masking-redpanda-1 rpk topic consume masked.customer.care_l2 \
+  --offset start --num 1 -f "%v\n"
+```
+
+### Startup behaviour
+
+On boot, `kafka-masker` creates `raw.customer.events` and `dlq.masking.errors` if they do not exist (idempotent via Admin API). Output topics are created automatically by Redpanda on first produce.
+
+---
+
+## Data warehouse / lake / mart masking
+
+The `dw-masker` service (Flask, port **5003**) exposes three masking modes for analytics and reporting stacks.
+
+### DW mode — masked PostgreSQL views
+
+`POST /views/refresh` reads `role_field_masks` from PostgreSQL and generates one schema + view per role:
+
+```sql
+-- Example: masked_agent.customers
+CREATE OR REPLACE VIEW masked_agent.customers AS
+SELECT
+  customer_id,
+  CASE WHEN name IS NULL THEN NULL
+       ELSE regexp_replace(name, '(\w)(\w+)', '\1***', 'g') END AS name,
+  CASE WHEN msisdn ... END AS msisdn,
+  ...
+FROM raw_customers;
+```
+
+| Schema | Role | Masking |
+|---|---|---|
+| `masked_agent` | agent | All 8 fields |
+| `masked_care_l2` | care_l2 | national_id, address, call, roaming, location |
+| `masked_billing_agent` | billing_agent | email, national_id, address, location |
+| `masked_supervisor` | supervisor | msisdn, national_id |
+| … | … | … |
+
+Privileged roles (`fraud_analyst`, `admin`, etc.) have no masked view — they query `raw_customers` directly or through the mart layer.
+
+Query from any PostgreSQL client:
+
+```sql
+\c admindb
+SELECT customer_id, name, msisdn FROM masked_agent.customers;
+```
+
+### Lake mode — masked Parquet on MinIO
+
+`POST /export` fetches records from `raw_customers`, masks them with OPA, and writes a Parquet file to MinIO.
+
+```bash
+curl -s -X POST http://localhost:5003/export \
+  -H "Content-Type: application/json" \
+  -d '{"role": "billing_agent", "customer_ids": ["C002", "C003"]}' | jq
+```
+
+**Response**
+```json
+{
+  "s3_path": "s3://masked-exports/billing_agent/customers/20260519T130000Z.parquet",
+  "rows": 2,
+  "denied": 0,
+  "policy_version": null
+}
+```
+
+MinIO console: **http://localhost:9001** — credentials `minioadmin / minioadmin123`.
+
+Browse exports under bucket `masked-exports/<role>/customers/`.
+
+### Mart mode — per-business-unit schemas
+
+`POST /marts/build` creates mart schemas that aggregate per-role views into business-unit namespaces:
+
+| Mart schema | Roles | Purpose |
+|---|---|---|
+| `mart_care` | care_l1, care_l2, care_supervisor | Care operations analytics |
+| `mart_billing` | billing_agent | Billing reporting |
+| `mart_fraud` | fraud_analyst, compliance_officer | Unmasked fraud/compliance mart |
+| `mart_ops` | noc_operator, field_technician, roaming_ops | Network operations |
+| `mart_partner` | partner, b2b_partner, mvno_partner | Partner data feeds |
+
+Each mart view is a pass-through to the corresponding `masked_<role>.customers` view (or `raw_customers` for zero-mask privileged roles).
+
+```bash
+# Refresh views first, then build marts
+curl -s -X POST http://localhost:5003/views/refresh -H "Content-Type: application/json" -d '{}' | jq .views_created
+curl -s -X POST http://localhost:5003/marts/build   -H "Content-Type: application/json" -d '{}' | jq .views_built
+```
+
+### DW Masker dashboard
+
+**http://localhost:5003** — shows MinIO bucket stats, recent Parquet exports, and view counts per role.
+
+---
+
+## Shared masking SDK
+
+`masking_sdk/` is a small Python package mounted into every service that needs to mask data outside Kong.
+
+```
+masking_sdk/
+  __init__.py
+  masking.py        # mask_email, mask_msisdn, mask_name, mask_national_id,
+                    #   mask_address, mask_redact, apply_masking(record, fields)
+  opa_client.py     # get_masked_fields(role, customer_id, path, ctx)
+                    #   → calls OPA, raises PermissionError if allow=false
+```
+
+The masking functions are a direct port of the Kong Lua equivalents — identical inputs produce identical outputs. This ensures a record masked at the API layer matches one masked in a batch job or Kafka consumer.
+
+### OPA call contract (all channels)
+
+```python
+# masking_sdk/opa_client.py
+payload = {
+    "input": {
+        "role":        role,
+        "customer_id": customer_id,
+        "path":        path,          # "/api/batch", "/api/stream", "/api/export"
+        "app_id":      "",            # required: OPA 1.x open-registration check
+        "ctx":         ctx or {},
+    }
+}
+```
+
+Raises `PermissionError` when `decision["allow"] == False`. Returns `decision["masked_fields"]` — the same list Kong uses for its two-pass Lua masking.
+
+---
+
 ## Services
 
 | Service | URL | Purpose |
@@ -391,11 +627,17 @@ curl -s -H "Authorization: Bearer $PARTNER_TOKEN" \
 | Kong Gateway | http://localhost:8000 | API gateway — JWT verify, OPA, masking, unmask validation |
 | Kong Admin | http://localhost:8001 | Kong admin API (metrics / config inspection) |
 | OPA | http://localhost:8181 | Policy engine — bundle mode, polls admin-service every 15–60 s |
-| Admin GUI | http://localhost:8888 | Masking policy, tiers, backends, apps, user lifecycle |
+| Admin GUI | http://localhost:8888 | Masking policy, tiers, backends, apps, user lifecycle; batch file masking |
 | Governance Service | http://localhost:8889 | Identity governance console + self-service portal |
+| DW Masker | http://localhost:5003 | Masked PostgreSQL views, Parquet lake exports, mart schemas |
+| MinIO Console | http://localhost:9001 | S3-compatible object store — masked Parquet exports |
+| MinIO S3 API | http://localhost:9000 | S3 API endpoint for boto3/pyarrow consumers |
+| Redpanda | localhost:9092 | Kafka-compatible broker — raw + masked customer event topics |
+| Redpanda Admin | http://localhost:9644 | Redpanda cluster health / topic management |
 | PostgreSQL | localhost:5432 | Keycloak (`keycloak` DB) + Admin Service + Governance (`admindb`) |
 | CRM Mock | internal only | Customer data (canonical PII field names) |
 | Billing Mock | internal only | Subscriber data (aliased PII field names) |
+| kafka-masker | internal only | Consumes `raw.customer.events`, publishes `masked.customer.<role>` |
 
 ---
 
@@ -470,8 +712,12 @@ bundle from the Admin Service within a few seconds of coming up.
 Once all containers are up:
 - **Frontend Hub** → http://localhost:3001
 - **Governance Console** → http://localhost:8889
-- **Admin GUI** → http://localhost:8888
+- **Admin GUI** (+ batch file masking) → http://localhost:8888
+- **DW / Lake / Mart Masker** → http://localhost:5003
+- **MinIO Console** → http://localhost:9001 (`minioadmin` / `minioadmin123`)
 - **Legacy portal** → http://localhost:3000
+
+Kafka (Redpanda) is available at `localhost:9092` (Kafka protocol) and Redpanda Admin at `localhost:9644`.
 
 ---
 
@@ -517,14 +763,17 @@ PARTNER_TOKEN=$(curl -s -X POST \
 
 ## Test data
 
-### CRM customers
+### CRM customers (also in `raw_customers` DW table)
 
 | ID | Name | MSISDN | Tier | Notes |
 |---|---|---|---|---|
-| C001 | Ahmad bin Abdullah | +60123456789 | vip | Requires access reference |
-| C002 | Siti Nurhaliza binti Tarudin | +60198765432 | standard | Standard access |
-| C003 | Rajesh Kumar Sharma | +60112233445 | standard | Suspended account |
-| C004 | Mei Ling Tan | +60167890123 | vip | Requires access reference |
+| C001 | Ahmad bin Abdullah / Amir bin Hamid | +60123456789 | vip | Requires access reference; VIP blocked for standard roles |
+| C002 | Siti Nurhaliza binti Tarudin / Nur Aina binti Yusof | +60198765432 | standard | Standard access |
+| C003 | Rajesh Kumar Sharma / Ravi s/o Krishnan | +60112233445 | standard | Suspended account |
+| C004 | Mei Ling Tan / Siti Rahayu | +60167890123 | vip | Requires access reference |
+| C999 | Test User | +60187654321 | standard | Extra row in `raw_customers` for batch/DW testing |
+
+> CRM mock and `raw_customers` use slightly different names for the same IDs — both serve valid test data for their respective channels.
 
 ### Billing subscribers (aliased field names)
 
@@ -561,6 +810,27 @@ All Kong endpoints require `Authorization: Bearer <token>`.
 | `X-Initiated-By: agent` | Optional — shifts care\_l2 MSISDN masking |
 | `X-Channel: ivr` | Optional — shifts agent name masking |
 | `X-Session-Type: readonly` | Optional — adds account balance masking |
+
+### Admin service — batch masking endpoints
+
+Require `X-Api-Key: governance-internal-key` header.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/mask/batch` | Mask JSON records array; body: `{role, records, customer_id_field?}` |
+| GET | `/mask/file` | Browser upload form — CSV / JSON / Parquet |
+| POST | `/mask/file` | Upload file for masking; form fields: `role`, `format`; returns masked file download |
+
+### DW Masker endpoints (`:5003`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | Dashboard — MinIO stats, export log, view counts |
+| GET | `/health` | Liveness probe |
+| POST | `/views/refresh` | Regenerate masked SQL views for all roles in PostgreSQL |
+| POST | `/export` | Mask records from `raw_customers`, write Parquet to MinIO; body: `{role, customer_ids?}` |
+| POST | `/marts/build` | Build mart schemas (`mart_care`, `mart_billing`, etc.) |
+| GET | `/exports` | List recent Parquet exports from `dw_exports` table |
 
 ### Governance service endpoints
 
@@ -1011,6 +1281,27 @@ Open **http://localhost:8888** — log in with `admin / admin123`.
 │       ├── portal_login.html   Self-service portal login
 │       └── portal_dashboard.html  My access + request form + history
 │
+├── masking_sdk/                Shared Python masking library (mounted into every
+│   ├── __init__.py             Python service that needs OPA-governed masking)
+│   ├── masking.py              mask_email, mask_msisdn, mask_name, mask_national_id,
+│   │                           mask_address, mask_redact, apply_masking(record, fields)
+│   │                           Direct port of Kong Lua masking functions
+│   └── opa_client.py           get_masked_fields(role, customer_id, path, ctx)
+│                               Always includes app_id="" (OPA 1.x open-registration fix)
+│
+├── kafka-masker/
+│   ├── app.py                  Consumer loop: raw.customer.events → masked.customer.<role>
+│   │                           Creates topics on startup; DLQ for failed messages
+│   ├── Dockerfile
+│   └── requirements.txt        confluent-kafka, requests
+│
+├── dw-masker/
+│   ├── app.py                  Flask :5003 — masked PostgreSQL views + Parquet lake exports
+│   │                           /views/refresh, /export, /marts/build, /exports, /
+│   │                           init_raw_customers() seeds demo PII table on startup
+│   ├── Dockerfile
+│   └── requirements.txt        pandas, pyarrow, boto3, psycopg2-binary, flask, requests
+│
 ├── crm-mock/
 │   └── app.py                  Flask mock — 4 customers, canonical field names
 │                               /health, /api/customer/{id}, /api/resolve?msisdn=,
@@ -1051,6 +1342,15 @@ postgres (healthy — creates keycloak DB + admindb via init.sql)
               └─► kong (started — all dependencies healthy)
                     (also depends on: crm-mock healthy, billing-mock healthy,
                      governance-service healthy for unmask validation)
+
+redpanda (healthy — Kafka-compatible broker, single-node dev mode)
+  └─► kafka-masker (started — creates topics, subscribes to raw.customer.events)
+        (also depends on: opa started)
+
+minio (healthy — S3 storage, bucket "masked-exports" created on first export)
+postgres (healthy)
+  └─► dw-masker :5003 (started — creates raw_customers demo table if absent,
+                        waits for minio healthy + opa started)
 ```
 
 Key guarantees:
@@ -1058,6 +1358,8 @@ Key guarantees:
 - OPA never starts until Admin Service is healthy — first bundle poll always succeeds.
 - Governance is up before Kong — unmask token validation is available immediately.
 - Keycloak realm is imported before frontend apps attempt OIDC discovery.
+- kafka-masker waits for Redpanda healthy before subscribing — avoids reconnect loop.
+- dw-masker waits for MinIO healthy before serving `/export` — avoids bucket-not-found errors on first request.
 
 ---
 
@@ -1120,3 +1422,25 @@ In production, replace with short-lived service tokens or mutual TLS.
 **High availability**  
 Single-instance stack. For production: Kong in DB-backed cluster mode, PostgreSQL with streaming
 replication, OPA as a sidecar or replicated service behind a load balancer.
+
+---
+
+### New integration channel notes
+
+**File/batch masking**  
+`/api/mask/batch` is protected by a static `X-Api-Key`. In production, replace with short-lived
+service tokens or mutual TLS. For large files (>100 MB Parquet), stream through pyarrow in
+row-group batches rather than loading the full DataFrame into memory.
+
+**Kafka masking**  
+The `kafka-masker` runs a single consumer thread. For production: use multiple partitions on the
+raw topic, deploy multiple replicas each with the same `group.id`, and tune `enable.auto.commit`
+per your exactly-once requirements. OPA is called per-message — cache the decision per
+`(role, customer_id)` tuple with a short TTL (≤60 s) to match the OPA bundle poll interval.
+
+**DW / Lake / Mart masking**  
+`raw_customers` is a demo table seeded with 5 rows. Replace with your actual data warehouse table
+or a federated query (PostgreSQL foreign data wrapper for Redshift / BigQuery / Snowflake). The
+masked PostgreSQL views can be granted to read-only DB users to enforce masking at the database
+layer without application changes. Parquet exports to MinIO can be picked up by Spark, dbt, or
+Trino via the S3-compatible API at `:9000`.
